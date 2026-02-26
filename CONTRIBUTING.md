@@ -43,6 +43,36 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 - **Notebooks**: `examples/quickstart.ipynb` (start here), plus 9 topic notebooks
 - **Demo**: `examples/jaxmm_demo.ipynb` (chemistry kernel)
 
+### Dev commands
+
+```bash
+# Environment
+conda activate chemistry
+
+# Run all tests (155 tests, ~44s)
+python -m pytest tests/ -v
+
+# Run a single test file
+python -m pytest tests/test_bonds.py -v
+
+# Run tests matching a keyword
+python -m pytest tests/ -v -k "bond"
+
+# Quick smoke test (fastest subset)
+python -m pytest tests/test_bonds.py tests/test_angles.py tests/test_torsions.py -v
+
+# Validate a change: run full suite, check exit code
+python -m pytest tests/ -v && echo "ALL PASS"
+```
+
+Float64 must be enabled before importing jaxmm. The test suite handles
+this via conftest.py, but standalone scripts need:
+
+```python
+import jax
+jax.config.update("jax_enable_x64", True)
+```
+
 ### Patterns
 
 - Frozen dataclasses as parameter containers, registered as JAX pytrees
@@ -141,17 +171,42 @@ All 155+ tests must pass before merging.
 - **JIT check**: every energy function must have a test that `jax.jit(fn)` matches the non-jit result.
 - **Tolerances**: bonds/angles/RB torsions 1e-4 kJ/mol, periodic torsions 1e-3, nonbonded 1e-3, GBSA 1e-3, CMAP 0.5 (bilinear interpolation limit), PBC nonbonded 1e-4, total 1e-3, gradients 1e-2 (CMMotionRemover residual).
 
-## Common pitfalls
+## Gotchas
 
-**NaN gradients from `jnp.linalg.norm`**: When the input vector can be zero (e.g. self-distance on the diagonal), `jnp.linalg.norm` returns 0 but its gradient is NaN. Use `jnp.sqrt(jnp.sum(x**2) + 1e-30)` instead. The epsilon does not affect forward-pass accuracy but keeps gradients finite.
+These are the most common sources of bugs and confusion, distilled from
+development experience.
 
-**Frozen dataclass not JIT-compatible**: JAX needs to know how to flatten/unflatten your dataclass. Call `_register_pytree(YourClass)` after defining it. Non-array fields (int, str) must go in `aux_field_names`.
+### JAX and numerical
 
-**OpenMM force group API**: Do not use `context.getState(groups=...)` to get per-force energies. It is unreliable. Instead, create a separate system with only the target force (see `get_openmm_force_energy` in `conftest.py`).
+**JAX float64 must be enabled first.** Call `jax.config.update("jax_enable_x64", True)` before any jaxmm import. Energy functions check at runtime via `_check_x64()` and raise if float64 is off.
 
-**OpenMM implicit solvent uses CustomGBForce, not GBSAOBCForce**: `openmmtools.testsystems.AlanineDipeptideImplicit` creates a `CustomGBForce` (not `GBSAOBCForce`). The extraction code handles both types. The CustomGBForce uses OBC1 tanh parameters by default; the coefficients are parsed from the expression string.
+**NaN gradients from `jnp.linalg.norm`.** When the input vector can be zero (e.g., self-distance on the diagonal), `jnp.linalg.norm` returns 0 but its gradient is NaN. Use `jnp.sqrt(jnp.sum(x**2) + 1e-30)` instead. The epsilon does not affect forward-pass accuracy but keeps gradients finite.
 
-**Unsupported systems fail at extraction time**: `extract_params` raises `ValueError` for systems with constraints, virtual sites, PME/Ewald electrostatics, or unknown force types. This is intentional: jaxmm computes all-pairs interactions without long-range corrections, so silently extracting a PME system would give wrong energies. Always use `constraints=None` when building OpenMM systems for jaxmm.
+**JIT causes tiny floating-point reordering.** JIT-compiled functions may produce results differing by ~1e-10 from non-JIT. Use 1e-8 tolerance for JIT consistency tests.
+
+**CMAP bilinear interpolation limit.** `jax.scipy.ndimage.map_coordinates` only supports order<=1 (no bicubic). CMAP uses bilinear interpolation, resulting in ~0.13 kJ/mol difference vs OpenMM on 6x6 grids. This is a known JAX limitation.
+
+### Dataclasses and pytrees
+
+**Frozen dataclass not JIT-compatible by default.** JAX needs to know how to flatten/unflatten your dataclass. Call `_register_pytree(YourClass)` after defining it. Non-array fields (int, str) must go in `aux_field_names`.
+
+**Optional fields need custom flatten/unflatten.** `ForceFieldParams` has optional fields (gbsa, rb_torsions, cmap, restraints) that can be `None`. The standard `_register_pytree` cannot handle `None` children; these use a custom `tree_flatten`/`tree_unflatten` pair. See the `ForceFieldParams` registration in `extract.py`.
+
+### OpenMM
+
+**Force group API is unreliable.** Do not use `context.getState(groups=...)` to get per-force energies. Instead, create a separate system with only the target force (see `get_openmm_force_energy` in `conftest.py`).
+
+**CMMotionRemover adds a small force correction** (~6e-3 kJ/mol/nm) not modeled in jaxmm. Gradient tests against OpenMM use 1e-2 tolerance to account for this.
+
+**OpenMM Verlet is leapfrog.** `setVelocities` sets v(t-dt/2), not v(t). When comparing against OpenMM Verlet trajectories, pre-kick by -dt/2*F/m to match velocity Verlet.
+
+**Implicit solvent uses CustomGBForce, not GBSAOBCForce.** `openmmtools.testsystems.AlanineDipeptideImplicit` creates a `CustomGBForce`. The extraction code handles both types. The CustomGBForce uses OBC1 tanh parameters (alpha=0.8, beta=0, gamma=2.909125); coefficients are parsed from the expression string.
+
+**CMAP Quantity objects.** `CMAPTorsionForce.getMapParameters` returns OpenMM `Quantity` objects. Use `value_in_unit` conversion when extracting.
+
+**Unsupported systems fail at extraction time.** `extract_params` raises `ValueError` for systems with constraints, virtual sites, PME/Ewald electrostatics, or unknown force types. This is intentional: jaxmm computes all-pairs interactions without long-range corrections, so silently extracting a PME system would give wrong energies. Always use `constraints=None` when building OpenMM systems.
+
+**Long-range dispersion correction** is not implemented. This is a constant offset depending on N/V and does not affect forces or relative energies.
 
 ## Style
 
