@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "jaxmm"
+version = "0.1.0"
+description = "Pure JAX molecular potential energy evaluation"
+license = "MIT"
+requires-python = ">=3.10"
+dependencies = [
+    "jax>=0.4.20",
+    "numpy>=1.24",
+    "jaxopt>=0.8",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.0", "openmm>=8.0", "openmmtools>=0.23"]
