@@ -10,6 +10,7 @@ build/
 
 # Pytest
 .pytest_cache/
+.coverage
 
 # Jupyter
 .ipynb_checkpoints/
@@ -25,3 +26,6 @@ build/
 *.npy
 *.pkl
 *.pickle
+
+# Audit workspace (local only)
+audit/
