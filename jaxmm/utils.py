@@ -16,6 +16,11 @@ import jaxopt
 
 from jaxmm.extract import ForceFieldParams
 from jaxmm.energy import total_energy, _check_x64
+from jaxmm.coordinates import (
+    ZMatrix,
+    zmatrix_log_abs_det_jacobian,
+    zmatrix_to_cartesian,
+)
 
 # Boltzmann constant in kJ/(mol*K)
 KB = 8.314462618e-3
@@ -65,6 +70,12 @@ def minimize_energy(
 def log_boltzmann(positions: jax.Array, params: ForceFieldParams, temperature: float) -> jax.Array:
     """Compute log unnormalized Boltzmann factor: -E(x) / (kB * T).
 
+    This is the density with respect to **Cartesian** coordinates. If your
+    samples come from internal coordinates, this is not the density you want:
+    the change of variables contributes a log-Jacobian term that is large
+    (roughly -84 for alanine dipeptide, about 84 kBT). Use
+    `log_boltzmann_internal` instead, which adds it for you.
+
     Args:
         positions: Atom coordinates, shape (n_atoms, 3) in nm.
         params: Force field parameters.
@@ -75,6 +86,46 @@ def log_boltzmann(positions: jax.Array, params: ForceFieldParams, temperature: f
     """
     energy = total_energy(positions, params)
     return -energy / (KB * temperature)
+
+
+def log_boltzmann_internal(
+    z_matrix: ZMatrix,
+    bonds: jax.Array,
+    angles: jax.Array,
+    torsions: jax.Array,
+    params: ForceFieldParams,
+    temperature: float,
+) -> jax.Array:
+    """Log unnormalized Boltzmann density in fixed-frame internal coordinates.
+
+    Applies the change of variables to the Cartesian Boltzmann density::
+
+        log p(b, a, t) = -E(x(b, a, t)) / (kB * T) + log |det dx/d(b, a, t)|
+
+    Omitting the Jacobian term is the standard error when training a flow in
+    internal coordinates. It is silent and large: for alanine dipeptide it is
+    about -84 nats, or 210 kJ/mol, which is enough to make any reweighting or
+    free-energy estimate meaningless.
+
+    The density is singular where a bond length is zero or a reference triple
+    is collinear, and correctly returns -inf there.
+
+    Args:
+        z_matrix: Z-matrix references for ``n_atoms`` atoms.
+        bonds: Bond lengths in nm, shape ``(n_atoms - 1,)``.
+        angles: Bond angles in radians, shape ``(n_atoms - 2,)``.
+        torsions: Torsion angles in radians, shape ``(n_atoms - 3,)``.
+        params: Force field parameters.
+        temperature: Temperature in Kelvin.
+
+    Returns:
+        Scalar log unnormalized density (dimensionless).
+    """
+    positions = zmatrix_to_cartesian(z_matrix, bonds, angles, torsions)
+    return (
+        log_boltzmann(positions, params, temperature)
+        + zmatrix_log_abs_det_jacobian(z_matrix, bonds, angles)
+    )
 
 
 def log_boltzmann_regularized(

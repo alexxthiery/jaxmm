@@ -22,11 +22,21 @@ from jaxmm.energy import (
 )
 from jaxmm.utils import (
     minimize_energy, log_boltzmann, log_boltzmann_regularized,
+    log_boltzmann_internal,
     log_prob, log_prob_regularized,
     dihedral_angle, save_params, load_params,
     KB, FEMTOSECOND, ANGSTROM, KCAL_PER_MOL,
 )
 from jaxmm.integrate import verlet, langevin_baoab, baoab_step, kinetic_energy, MDTrajectory
+from jaxmm.coordinates import (
+    ZMatrix,
+    aldp_zmatrix,
+    canonicalize_cartesian,
+    cartesian_to_zmatrix,
+    validate_zmatrix,
+    zmatrix_log_abs_det_jacobian,
+    zmatrix_to_cartesian,
+)
 
 __all__ = [
     "extract_params",
@@ -51,6 +61,7 @@ __all__ = [
     "minimize_energy",
     "log_boltzmann",
     "log_boltzmann_regularized",
+    "log_boltzmann_internal",
     "log_prob",
     "log_prob_regularized",
     "dihedral_angle",
@@ -61,6 +72,13 @@ __all__ = [
     "baoab_step",
     "kinetic_energy",
     "MDTrajectory",
+    "ZMatrix",
+    "aldp_zmatrix",
+    "canonicalize_cartesian",
+    "cartesian_to_zmatrix",
+    "validate_zmatrix",
+    "zmatrix_log_abs_det_jacobian",
+    "zmatrix_to_cartesian",
     "KB",
     "FEMTOSECOND",
     "ANGSTROM",
