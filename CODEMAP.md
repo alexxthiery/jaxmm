@@ -18,7 +18,7 @@ jaxmm/                  # core library (~2802 lines, 6 modules excluding noteboo
   utils.py               minimize, log_boltzmann, dihedrals, serialization, constants (461 lines)
   coordinates.py         fixed-frame z-matrix transforms + log Jacobian (397 lines)
   notebook.py            Jupyter helpers: viz, Ramachandran, free energy (297 lines, not re-exported)
-tests/                   # 215 tests
+tests/                   # 242 tests
   conftest.py            ALDP fixtures (vacuum + implicit), OpenMM reference helpers
   test_extraction.py     param shapes/values/validation (24 tests)
   test_bonds.py          bond energy vs OpenMM (5)
@@ -34,9 +34,10 @@ tests/                   # 215 tests
   test_grad.py           gradients vs OpenMM + finite diff (8)
   test_integrate.py      Verlet + Langevin BAOAB (17)
   test_minimize.py       L-BFGS minimization (4)
-  test_serialization.py  save/load roundtrip (2)
-  test_coordinates.py    z-matrix transforms, Jacobian vs autodiff, gradient safety, density (48)
+  test_serialization.py  save/load roundtrip incl. every optional field (8)
+  test_coordinates.py    z-matrix transforms, Jacobian vs autodiff, gradient safety, density (57)
   test_validation.py     defensive input validation across energy terms (12)
+  test_notebook.py       free energy vs analytic Gaussian, angles, PDB writer (11)
 examples/                # 11 Jupyter notebooks
   quickstart.ipynb           core API in 5 minutes
   energy_landscape.ipynb     PES visualization, free energy surfaces
@@ -122,7 +123,7 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 ## Entry points
 
 - **Library**: `import jaxmm; params = jaxmm.extract_params(system)`
-- **Tests**: `python -m pytest tests/ -v` (215 tests)
+- **Tests**: `python -m pytest tests/ -v` (242 tests, 93% branch coverage)
 - **Notebooks**: `examples/quickstart.ipynb` (start here)
 - **Demo**: `examples/jaxmm_demo.ipynb`
 

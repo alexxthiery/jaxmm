@@ -192,9 +192,10 @@ tests/
   test_grad.py       gradients vs OpenMM forces + finite diff (8 tests)
   test_integrate.py  Verlet + Langevin BAOAB integrators (17 tests)
   test_minimize.py   L-BFGS-B minimization vs OpenMM (4 tests)
-  test_serialization.py save/load roundtrip (2 tests)
-  test_coordinates.py  z-matrix transforms, Jacobian, gradient safety, density (48 tests)
+  test_serialization.py save/load roundtrip incl. every optional field (8 tests)
+  test_coordinates.py  z-matrix transforms, Jacobian, gradient safety, density (57 tests)
   test_validation.py   defensive input validation across energy terms (12 tests)
+  test_notebook.py     free energy, backbone angles, PDB writer (11 tests)
 examples/
   quickstart.ipynb           core API in 5 minutes
   energy_landscape.ipynb     PES visualization, free energy surfaces, basin analysis
@@ -215,7 +216,7 @@ examples/
 python -m pytest tests/ -v
 ```
 
-215 tests. Energy terms validated against OpenMM on alanine dipeptide (22 atoms) across 50 MD frames for both vacuum and implicit solvent systems. Integrators validated against OpenMM trajectories and statistical mechanics (equipartition, harmonic variance).
+242 tests (240 run, 2 skip without py3Dmol). Energy terms validated against OpenMM on alanine dipeptide (22 atoms) across 50 MD frames for both vacuum and implicit solvent systems. Integrators validated against OpenMM trajectories and statistical mechanics (equipartition, harmonic variance).
 
 ## Validation summary
 
@@ -223,13 +224,22 @@ python -m pytest tests/ -v
 |-------|--------|
 | Per-term energy vs OpenMM | < 1e-4 kJ/mol (bonds, angles), < 1e-3 (torsions, nonbonded) |
 | RB torsions vs OpenMM | < 1e-4 kJ/mol across MD frames |
-| CMAP correction vs OpenMM | < 0.5 kJ/mol (bilinear interpolation, JAX order<=1 limit) |
+| CMAP correction vs OpenMM | < 0.5 kJ/mol (bilinear interpolation, JAX order<=1 limit). See the note below |
 | PBC nonbonded vs OpenMM | < 1e-4 kJ/mol (CutoffPeriodic with switching) |
 | GBSA energy vs OpenMM | < 1e-3 kJ/mol across 50 MD frames (implicit solvent) |
 | Total energy vs OpenMM | < 1e-3 kJ/mol across 50 MD frames (vacuum and implicit) |
 | Gradients vs finite differences | < 1e-3 kJ/mol/nm |
 | Gradients vs OpenMM forces | < 1e-2 kJ/mol/nm (residual from CMMotionRemover) |
 | jit+vmap speedup | ~234x over sequential OpenMM (200 configs, CPU) |
+
+**A note on the CMAP tolerance.** At 300 K, kB*T is 2.4943 kJ/mol. Every other term
+above agrees with OpenMM to under 1e-3 kT, but CMAP's bilinear interpolation sits at
+roughly 0.05 kT typical and 0.2 kT worst case. That is harmless for structure and
+dynamics, where kT-scale fluctuations dominate, but it is large enough to bias a free
+energy difference or a reweighting estimate. If you need CMAP at full accuracy for a
+thermodynamic quantity, evaluate that term in OpenMM. The cause is a JAX limitation:
+`jax.scipy.ndimage.map_coordinates` supports order <= 1, so OpenMM's bicubic
+interpolation cannot be reproduced.
 
 ## Scope and guardrails
 

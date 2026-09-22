@@ -104,7 +104,7 @@ Breaking any of these will break downstream users:
 # assuming one: `conda env list`, then verify with
 #   python -c "import jax, openmm, openmmtools, jaxopt"
 
-# Run all tests (215 tests)
+# Run all tests (242 tests; 2 skip without py3Dmol)
 python -m pytest tests/ -v
 
 # Run a single test file
@@ -132,7 +132,7 @@ These are the most common sources of bugs and confusion:
 - **Frozen dataclass pytree registration**: JAX cannot flatten/unflatten frozen dataclasses automatically. Call `_register_pytree(YourClass)` after definition. Non-array fields (int, str) go in `aux_field_names`.
 - **OpenMM force group API**: unreliable for per-force energies. Use isolated single-force systems (`get_openmm_force_energy` in `conftest.py`).
 - **CMMotionRemover**: OpenMM adds a small force correction (~6e-3 kJ/mol/nm) not modeled in jaxmm. Gradient tests use 1e-2 tolerance.
-- **CMAP bilinear limit**: `jax.scipy.ndimage.map_coordinates` only supports order<=1. CMAP uses bilinear interpolation with ~0.13 kJ/mol difference vs OpenMM's bicubic.
+- **CMAP bilinear limit**: `jax.scipy.ndimage.map_coordinates` only supports order<=1. CMAP uses bilinear interpolation with ~0.13 kJ/mol difference vs OpenMM's bicubic. In kT at 300 K that is ~0.05 typical, ~0.2 worst case: fine for structure and dynamics, but it can bias a free energy or reweighting estimate. Every other term agrees to under 1e-3 kT. Judge tolerances in kT, not kJ/mol.
 - **OpenMM Verlet is leapfrog**: `setVelocities` sets v(t-dt/2), not v(t). Pre-kick by -dt/2*F/m to match velocity Verlet.
 - **JIT reordering**: tiny floating-point differences (~1e-10). Use 1e-8 tolerance for JIT consistency tests.
 - **Constraints**: `extract_params` raises `ValueError` for constrained systems. Always use `constraints=None` when building OpenMM systems.

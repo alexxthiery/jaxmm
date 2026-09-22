@@ -40,7 +40,7 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 ### Entry points
 
 - **Library**: `import jaxmm; params = jaxmm.extract_params(system)`
-- **Tests**: `python -m pytest tests/ -v` (215 tests)
+- **Tests**: `python -m pytest tests/ -v` (242 tests, 93% branch coverage)
 - **Notebooks**: `examples/quickstart.ipynb` (start here), plus 9 topic notebooks
 - **Demo**: `examples/jaxmm_demo.ipynb` (chemistry kernel)
 
@@ -51,7 +51,7 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 # The env name is machine specific. Check with `conda env list`, then verify:
 #   python -c "import jax, openmm, openmmtools, jaxopt"
 
-# Run all tests (215 tests)
+# Run all tests (242 tests; 2 skip without py3Dmol)
 python -m pytest tests/ -v
 
 # Run a single test file
@@ -205,7 +205,7 @@ development experience.
 
 **JIT causes tiny floating-point reordering.** JIT-compiled functions may produce results differing by ~1e-10 from non-JIT. Use 1e-8 tolerance for JIT consistency tests.
 
-**CMAP bilinear interpolation limit.** `jax.scipy.ndimage.map_coordinates` only supports order<=1 (no bicubic). CMAP uses bilinear interpolation, resulting in ~0.13 kJ/mol difference vs OpenMM on 6x6 grids. This is a known JAX limitation.
+**CMAP bilinear interpolation limit.** `jax.scipy.ndimage.map_coordinates` only supports order<=1 (no bicubic). CMAP uses bilinear interpolation, resulting in ~0.13 kJ/mol difference vs OpenMM on 6x6 grids. This is a known JAX limitation. Express it in kT before deciding whether it matters: at 300 K that is about 0.05 kT typical and 0.2 kT worst case, negligible for structure and dynamics but large enough to bias a free energy or reweighting estimate. Every other term agrees to under 1e-3 kT.
 
 ### Dataclasses and pytrees
 
