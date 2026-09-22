@@ -78,6 +78,21 @@ def test_log_prob_deprecated(aldp_positions_jnp, aldp_params):
             pass
 
 
+def test_log_prob_matches_log_boltzmann(aldp_positions_jnp, aldp_params):
+    """The deprecated alias must still return the right number.
+
+    test_log_prob_deprecated turns the warning into an error, so it never
+    reaches the return statement. Without this, log_prob could return anything
+    and still pass.
+    """
+    import warnings
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        old_value = float(log_prob(aldp_positions_jnp, aldp_params, 300.0))
+    new_value = float(log_boltzmann(aldp_positions_jnp, aldp_params, 300.0))
+    assert old_value == new_value, f"alias diverged: {old_value} vs {new_value}"
+
+
 def test_energy_components_sum_vacuum(aldp_positions_jnp, aldp_params):
     """energy_components values sum to total_energy for vacuum system."""
     total = float(total_energy(aldp_positions_jnp, aldp_params))

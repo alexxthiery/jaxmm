@@ -762,3 +762,63 @@ def test_backbone_phi_psi_are_explicit_zmatrix_torsions(aldp_topology):
 
     np.testing.assert_array_equal(quadruple(14), np.asarray(jaxmm.phi_indices(aldp_topology))[0])
     np.testing.assert_array_equal(quadruple(16), np.asarray(jaxmm.psi_indices(aldp_topology))[0])
+
+
+# ---------------------------------------------------------------------------
+# validate_zmatrix: every rejection branch
+#
+# The checks added for the fixed-frame and degenerate-reference cases were
+# tested when they landed, but the original nine branches were not. A
+# validator whose branches are unexercised is a validator nobody knows works.
+# ---------------------------------------------------------------------------
+
+def _zmatrix(bond_ref, angle_ref, torsion_ref):
+    """Build a ZMatrix from plain lists, bypassing any validation."""
+    return jaxmm.ZMatrix(
+        bond_ref=jnp.array(bond_ref, dtype=jnp.int32),
+        angle_ref=jnp.array(angle_ref, dtype=jnp.int32),
+        torsion_ref=jnp.array(torsion_ref, dtype=jnp.int32),
+    )
+
+
+@pytest.mark.parametrize(
+    "bond_ref,angle_ref,torsion_ref,match",
+    [
+        # bond_ref is not one-dimensional
+        ([[-1, 0], [1, 2]], [[-1, -1], [0, 1]], [[-1, -1], [-1, 0]],
+         "one-dimensional"),
+        # fewer than three atoms
+        ([-1, 0], [-1, -1], [-1, -1], "at least three atoms"),
+        # atom 0 must have no bond reference
+        ([0, 0, 1, 2], [-1, -1, 0, 1], [-1, -1, -1, 0], r"bond_ref\[0\]"),
+        # atoms 0 and 1 must have no angle reference
+        ([-1, 0, 1, 2], [-1, 0, 0, 1], [-1, -1, -1, 0], r"angle_ref\[:2\]"),
+        # atoms 0, 1 and 2 must have no torsion reference
+        ([-1, 0, 1, 2], [-1, -1, 0, 1], [-1, -1, 0, 0], r"torsion_ref\[:3\]"),
+        # an angle reference at or beyond its own atom index
+        ([-1, 0, 1, 2], [-1, -1, 0, 3], [-1, -1, -1, 0], "angle references"),
+        # a torsion reference at or beyond its own atom index
+        ([-1, 0, 1, 2], [-1, -1, 0, 1], [-1, -1, -1, 3], "torsion references"),
+    ],
+    ids=["bond_ref-2d", "too-few-atoms", "bond_ref[0]", "angle_ref[:2]",
+         "torsion_ref[:3]", "angle-ref-out-of-range", "torsion-ref-out-of-range"],
+)
+def test_validate_zmatrix_rejection_branches(bond_ref, angle_ref, torsion_ref, match):
+    """Each malformed z-matrix is rejected with a message naming the problem."""
+    with pytest.raises(ValueError, match=match):
+        jaxmm.validate_zmatrix(_zmatrix(bond_ref, angle_ref, torsion_ref))
+
+
+def test_validate_zmatrix_rejects_negative_references():
+    """A negative reference for an atom past the frame is out of range.
+
+    -1 is the sentinel for the first three atoms only; later atoms must name a
+    real earlier atom.
+    """
+    with pytest.raises(ValueError, match="bond references"):
+        jaxmm.validate_zmatrix(_zmatrix([-1, 0, 1, -1], [-1, -1, 0, 1], [-1, -1, -1, 0]))
+
+
+def test_validate_zmatrix_accepts_the_shipped_aldp_matrix():
+    """Positive control: the validator must not reject a z-matrix that is correct."""
+    jaxmm.validate_zmatrix(jaxmm.aldp_zmatrix())
