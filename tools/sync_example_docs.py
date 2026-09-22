@@ -132,9 +132,10 @@ python tools/render_examples.py --only quickstart
 ```
 
 Figures land in each example's `output/`, which is gitignored. Most examples
-finish in under a minute, but `free_energy` and `parallel_tempering` run long
-MD and take several minutes each; raise `--timeout` if the renderer gives up on
-them.
+finish in well under a minute. `parallel_tempering` is the slowest at about 11
+minutes, because it runs 10 replicas, and `free_energy` does 500k MD steps. The
+renderer's default 900s per-example timeout covers both; only lower it if you
+know what you are skipping.
 
 These are plain Python, not notebooks. `# %%` marks a cell, so Jupyter and VS
 Code open them as notebooks when jupytext is installed, and they also run as
