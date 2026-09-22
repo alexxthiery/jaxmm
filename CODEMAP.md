@@ -1,6 +1,6 @@
 # Codemap: jaxmm
 
-> Last updated: 2026-02-26
+> Last updated: 2026-09-23
 
 Pure JAX molecular potential energy. OpenMM extracts force field params once;
 energy evaluation is pure JAX (jit, vmap, grad). Built for training normalizing
@@ -10,14 +10,15 @@ per sample.
 ## Structure
 
 ```
-jaxmm/                  # core library (~1361 lines, 5 modules)
-  __init__.py            public API, 40 exports
-  extract.py             OpenMM System -> frozen dataclasses (614 lines)
-  energy.py              pure JAX energy functions (340 lines)
-  integrate.py           Verlet + Langevin BAOAB integrators (166 lines)
-  utils.py               minimize, log_boltzmann, dihedrals, serialization, constants (409 lines)
+jaxmm/                  # core library (~2802 lines, 6 modules excluding notebook.py)
+  __init__.py            public API, 44 exports
+  extract.py             OpenMM System -> frozen dataclasses (891 lines)
+  energy.py              pure JAX energy functions + input validation (743 lines)
+  integrate.py           Verlet + Langevin BAOAB integrators (226 lines)
+  utils.py               minimize, log_boltzmann, dihedrals, serialization, constants (461 lines)
+  coordinates.py         fixed-frame z-matrix transforms + log Jacobian (397 lines)
   notebook.py            Jupyter helpers: viz, Ramachandran, free energy (297 lines, not re-exported)
-tests/                   # 155 tests, ~44s
+tests/                   # 215 tests
   conftest.py            ALDP fixtures (vacuum + implicit), OpenMM reference helpers
   test_extraction.py     param shapes/values/validation (24 tests)
   test_bonds.py          bond energy vs OpenMM (5)
@@ -34,6 +35,8 @@ tests/                   # 155 tests, ~44s
   test_integrate.py      Verlet + Langevin BAOAB (17)
   test_minimize.py       L-BFGS minimization (4)
   test_serialization.py  save/load roundtrip (2)
+  test_coordinates.py    z-matrix transforms, Jacobian vs autodiff, gradient safety, density (48)
+  test_validation.py     defensive input validation across energy terms (12)
 examples/                # 11 Jupyter notebooks
   quickstart.ipynb           core API in 5 minutes
   energy_landscape.ipynb     PES visualization, free energy surfaces
@@ -59,9 +62,16 @@ extract.py              jax, numpy
     |         +---> integrate.py    jax (imports total_energy from energy.py,
     |         |                          KB from utils.py)
     |         |
-    |         +---> utils.py        jax, numpy, jaxopt
-    |                               (imports ForceFieldParams from extract.py,
-    |                                total_energy from energy.py)
+    |         +---> coordinates.py  jax, numpy
+    |         |                     (imports _check_x64 and
+    |         |                      _check_positions_shape from energy.py,
+    |         |                      _register_pytree from extract.py)
+    |         |            |
+    |         +------------+---> utils.py   jax, numpy, jaxopt
+    |                            (ForceFieldParams from extract.py,
+    |                             total_energy from energy.py,
+    |                             z-matrix transforms from coordinates.py
+    |                             for log_boltzmann_internal)
     |
     +---> notebook.py   numpy, jax
                         (imports KB, dihedral_angle from utils.py,
@@ -70,7 +80,10 @@ extract.py              jax, numpy
 ```
 
 No circular dependencies. `energy.py` imports only type definitions from
-`extract.py`. `notebook.py` is not re-exported from `__init__.py`.
+`extract.py`. `coordinates.py` is pure geometry: it touches no energy term and
+borrows only two private helpers, `_check_x64` and `_register_pytree`, so that
+precision checking and pytree registration have one home each.
+`notebook.py` is not re-exported from `__init__.py`.
 
 ## Modules
 
@@ -79,7 +92,8 @@ No circular dependencies. `energy.py` imports only type definitions from
 | `extract.py` | Dataclasses + extraction from OpenMM | `BondParams`, `AngleParams`, `TorsionParams`, `RBTorsionParams`, `CmapParams`, `RestraintParams`, `NonbondedParams`, `GBSAParams`, `ForceFieldParams`, `extract_params()`, `phi_indices()`, `psi_indices()`, `make_restraints()` |
 | `energy.py` | Pure JAX energy functions | `bond_energy()`, `angle_energy()`, `torsion_energy()`, `rb_torsion_energy()`, `cmap_energy()`, `restraint_energy()`, `nonbonded_energy()`, `gbsa_energy()`, `total_energy()`, `energy_components()` |
 | `integrate.py` | MD integrators (pure JAX, `jax.lax.scan`) | `verlet()`, `langevin_baoab()`, `baoab_step()`, `kinetic_energy()`, `MDTrajectory` |
-| `utils.py` | Minimization, log-Boltzmann, geometry, serialization, constants | `minimize_energy()`, `log_boltzmann()`, `log_boltzmann_regularized()`, `dihedral_angle()`, `save_params()`, `load_params()`, `KB`, `FEMTOSECOND`, `ANGSTROM`, `KCAL_PER_MOL` |
+| `utils.py` | Minimization, log-Boltzmann, geometry, serialization, constants | `minimize_energy()`, `log_boltzmann()`, `log_boltzmann_internal()`, `log_boltzmann_regularized()`, `dihedral_angle()`, `save_params()`, `load_params()`, `KB`, `FEMTOSECOND`, `ANGSTROM`, `KCAL_PER_MOL` |
+| `coordinates.py` | Fixed-frame internal coordinates (z-matrix), input validation | `ZMatrix`, `zmatrix_to_cartesian()`, `cartesian_to_zmatrix()`, `canonicalize_cartesian()`, `zmatrix_log_abs_det_jacobian()`, `validate_zmatrix()`, `aldp_zmatrix()` |
 | `notebook.py` | Jupyter helpers (not in public API) | `show_structure()`, `animate_trajectory()`, `animate_mode()`, `phi_psi_degrees()`, `plot_ramachandran()`, `free_energy_1d()`, `free_energy_2d()` |
 
 ## Data flow
@@ -108,7 +122,7 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 ## Entry points
 
 - **Library**: `import jaxmm; params = jaxmm.extract_params(system)`
-- **Tests**: `python -m pytest tests/ -v` (155 tests, ~44s)
+- **Tests**: `python -m pytest tests/ -v` (215 tests)
 - **Notebooks**: `examples/quickstart.ipynb` (start here)
 - **Demo**: `examples/jaxmm_demo.ipynb`
 
@@ -120,7 +134,12 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 - Integrators: nested `jax.lax.scan` (inner for stepping, outer for saving)
 - Test validation: each term tested against isolated OpenMM force (not force group API)
 - Optional fields (gbsa, rb_torsions, cmap, restraints): `None` when absent, custom pytree flatten/unflatten
-- Gradient safety: `jnp.sqrt(r_sq + 1e-30)` instead of `jnp.linalg.norm` (avoids NaN grad at zero)
+- Gradient safety: `jnp.sqrt(r_sq + 1e-30)` instead of `jnp.linalg.norm` (avoids NaN grad at zero),
+  and `atan2(|u x v|, u . v)` instead of `arccos` for angles (avoids NaN grad at 0 and pi)
+- Metadata validation is host-side (numpy) and separate from the traced transforms,
+  so `validate_zmatrix` can raise clear errors without breaking jit
+- Defensive boundary checks: static shape and atom-count checks always run;
+  index-bound checks run eagerly and are skipped under jit/vmap where values are tracers
 
 ## Units
 

@@ -73,11 +73,18 @@ All energy functions follow the same signature: `(positions, params) -> scalar`.
 | `total_energy(pos, params)` | Sum of all terms (optional terms included when present) |
 | `energy_components(pos, params)` | Dict of per-term energies (shared distance matrix) |
 | `make_restraints(indices, ref_pos, k)` | Create RestraintParams for use in ForceFieldParams |
-| `log_boltzmann(pos, params, T)` | `-E / (kB * T)` |
+| `log_boltzmann(pos, params, T)` | `-E / (kB * T)`, the **Cartesian** density |
+| `log_boltzmann_internal(z, bonds, angles, torsions, params, T)` | Boltzmann density in internal coordinates, Jacobian included |
 | `log_boltzmann_regularized(pos, params, T, cut, max)` | With energy clamping for numerical stability |
 | `phi_indices(topology)` | Backbone phi dihedral atom indices from OpenMM Topology |
 | `psi_indices(topology)` | Backbone psi dihedral atom indices from OpenMM Topology |
 | `dihedral_angle(positions, indices)` | Compute dihedral angles from positions + index array |
+| `zmatrix_to_cartesian(z, bonds, angles, torsions)` | Internal coordinates to positions in the fixed frame |
+| `cartesian_to_zmatrix(z, pos)` | Positions to internal coordinates |
+| `canonicalize_cartesian(z, pos)` | Remove rigid translation and rotation |
+| `zmatrix_log_abs_det_jacobian(z, bonds, angles)` | `log \|det J\|` of the internal-to-Cartesian map |
+| `validate_zmatrix(z)` | Host-side check of z-matrix metadata (raises `ValueError`) |
+| `aldp_zmatrix()` | Z-matrix for the 22-atom openmmtools alanine dipeptide |
 | `verlet(pos, vel, params, dt, n, ...)` | Velocity Verlet integrator (symplectic, energy-conserving) |
 | `langevin_baoab(pos, vel, params, dt, T, friction, n, *, key)` | Langevin BAOAB thermostat (second-order, ergodic) |
 | `kinetic_energy(vel, masses)` | `0.5 * sum(m * v^2)` in kJ/mol |
@@ -90,15 +97,83 @@ Both integrators return `MDTrajectory(positions, velocities, trajectory_position
 
 **Unit constants**: `FEMTOSECOND` (1e-3 ps), `ANGSTROM` (0.1 nm), `KCAL_PER_MOL` (4.184 kJ/mol), `KB` (Boltzmann constant, kJ/(mol*K)). Multiply to convert: `dt = 2.0 * jaxmm.FEMTOSECOND` gives 0.002 ps.
 
+## Internal coordinates
+
+For training normalizing flows against a Boltzmann target it is usually better to
+work in internal coordinates than in Cartesian ones: bond lengths and angles are
+stiff and nearly Gaussian, torsions carry the interesting multimodality, and the
+six rigid-body degrees of freedom disappear.
+
+`jaxmm.coordinates` provides that change of variables and the log Jacobian the
+change of variables formula needs.
+
+```python
+z = jaxmm.aldp_zmatrix()          # 22-atom alanine dipeptide
+jaxmm.validate_zmatrix(z)         # host-side check, do this once at setup
+
+bonds, angles, torsions = jaxmm.cartesian_to_zmatrix(z, positions)
+positions = jaxmm.zmatrix_to_cartesian(z, bonds, angles, torsions)
+
+# Boltzmann density in internal coordinates, change of variables included
+logp = jaxmm.log_boltzmann_internal(z, bonds, angles, torsions, params, 300.0)
+```
+
+**Use `log_boltzmann_internal`, not `log_boltzmann`, for internal-coordinate
+samples.** `log_boltzmann` returns the density with respect to Cartesian
+coordinates. The change of variables adds `log |det J|`, which for alanine
+dipeptide is about `-84` nats, or 210 kJ/mol, or 84 kBT. Omitting it is silent
+and large enough to make any reweighting or free-energy estimate meaningless.
+
+**Backbone phi and psi are explicit z-matrix torsions.** For the shipped ALDP
+z-matrix, `torsions[11]` is phi and `torsions[13]` is psi, matching
+`phi_indices` and `psi_indices` exactly. This is what makes these coordinates
+suitable for a flow: the slow collective variables are sampled directly rather
+than being nonlinear functions of the sampled variables.
+
+**Z-matrix torsions carry the opposite sign to `dihedral_angle`.**
+`coordinates.py` follows OpenMM's `PeriodicTorsionForce`; `utils.dihedral_angle`
+negates to match the biochemistry and mdtraj convention. Both are correct in
+their own context and neither will change. A Ramachandran plot built from
+z-matrix torsions without negating is mirrored, and looks entirely plausible:
+
+```python
+phi_zmat = -torsions[11]   # now matches jaxmm.dihedral_angle
+psi_zmat = -torsions[13]
+```
+
+**The fixed frame.** Atom 0 sits at the origin, atom 1 on the positive x-axis, and
+atom 2 in the xy-plane. That removes the six rigid degrees of freedom and makes the
+map square: `3N - 6` internal coordinates in, `3N - 6` free Cartesian coordinates out.
+
+**The frame constrains the first three atoms.** `bond_ref[2]` must be 1 and
+`angle_ref[2]` must be 0, because atom 2 is placed relative to atom 1 at an angle
+measured against atom 0. Every reference triple must also name three distinct atoms.
+`validate_zmatrix` enforces both. Call it once when you build a z-matrix; the
+transforms themselves stay jit-traceable and do not re-check.
+
+**The volume element** is `r_2` for atom 2 and `r_i^2 sin(theta_i)` for each
+atom `i >= 3`. Atom 1 contributes 1 because it is pinned to the x-axis.
+
+**The map is singular** where a bond length is zero or a reference triple is
+collinear, and `zmatrix_log_abs_det_jacobian` correctly diverges to `-inf` there.
+That is a property of internal coordinates, not a defect. Away from that
+measure-zero set every transform returns finite gradients, including at geometries
+that are exactly collinear.
+
+**Chirality is preserved.** Torsions are signed, so a molecule and its mirror image
+map to different internal coordinates. `canonicalize_cartesian` removes rigid motion
+without collapsing enantiomers.
+
 ## Project structure
 
 ```
 jaxmm/
-  __init__.py        public API (37 exports)
+  __init__.py        public API (44 exports)
   extract.py         OpenMM System -> ForceFieldParams dataclass
   energy.py          pure JAX energy functions
   integrate.py       Verlet and Langevin BAOAB integrators (pure JAX)
   utils.py           minimize_energy, log_boltzmann, dihedral_angle, serialization
+  coordinates.py     fixed-frame z-matrix transforms and their log Jacobian
   notebook.py        visualization and analysis helpers for Jupyter (not re-exported)
 tests/
   conftest.py        ALDP fixtures (vacuum + implicit), OpenMM reference helpers
@@ -118,6 +193,8 @@ tests/
   test_integrate.py  Verlet + Langevin BAOAB integrators (17 tests)
   test_minimize.py   L-BFGS-B minimization vs OpenMM (4 tests)
   test_serialization.py save/load roundtrip (2 tests)
+  test_coordinates.py  z-matrix transforms, Jacobian, gradient safety, density (48 tests)
+  test_validation.py   defensive input validation across energy terms (12 tests)
 examples/
   quickstart.ipynb           core API in 5 minutes
   energy_landscape.ipynb     PES visualization, free energy surfaces, basin analysis
@@ -138,7 +215,7 @@ examples/
 python -m pytest tests/ -v
 ```
 
-155 tests, ~44s. Energy terms validated against OpenMM on alanine dipeptide (22 atoms) across 50 MD frames for both vacuum and implicit solvent systems. Integrators validated against OpenMM trajectories and statistical mechanics (equipartition, harmonic variance).
+215 tests. Energy terms validated against OpenMM on alanine dipeptide (22 atoms) across 50 MD frames for both vacuum and implicit solvent systems. Integrators validated against OpenMM trajectories and statistical mechanics (equipartition, harmonic variance).
 
 ## Validation summary
 

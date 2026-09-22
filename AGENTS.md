@@ -46,21 +46,29 @@ extract.py          <-- jax, numpy (openmm imported lazily, only in extract_para
     v
 energy.py           <-- jax, extract.py (dataclass types only)
     |
-    +--------+
-    |        |
-    v        v
-utils.py   integrate.py
-    |          |
-    v          v
-  jaxopt     jax, energy.py, utils.py (KB constant)
+    +--------+-------------+
+    |        |             |
+    v        v             v
+integrate.py  coordinates.py ----+
+    |               |              |
+    v               v              v
+  jax, energy.py, jax, numpy    utils.py
+  utils.py (KB)   (energy.py    (extract.py, energy.py,
+                   _check_x64,   coordinates.py for
+                   _check_       log_boltzmann_internal)
+                   positions_    |
+                   shape)        v
+                               jaxopt
 
 notebook.py         <-- utils.py (KB, dihedral_angle), extract.py (phi/psi_indices)
                         matplotlib, py3Dmol, openmm (all lazy-imported)
 ```
 
 No circular dependencies. `energy.py` imports only type definitions from
-`extract.py`, never extraction logic. `notebook.py` is not re-exported
-from `__init__.py`.
+`extract.py`, never extraction logic. `coordinates.py` is pure geometry: it
+touches no energy term and borrows only private helpers (`_check_x64`,
+`_check_positions_shape`, `_register_pytree`). `utils.py` depends on
+`coordinates.py` for `log_boltzmann_internal`. `notebook.py` is not re-exported from `__init__.py`.
 
 ## Key patterns
 
@@ -70,6 +78,12 @@ from `__init__.py`.
 - **Gradient safety**: `jnp.sqrt(r_sq + 1e-30)` instead of `jnp.linalg.norm` (avoids NaN grad at zero distance)
 - **Integrators**: nested `jax.lax.scan` (inner for stepping, outer for trajectory saving)
 - **Optional fields**: `ForceFieldParams` has optional fields (gbsa, rb_torsions, cmap, restraints) that are `None` when absent; custom flatten/unflatten handles this
+- **Internal coordinates**: `coordinates.py` maps between a fixed-frame z-matrix and
+  Cartesian positions and supplies `log |det J|`, the pieces a normalizing flow needs
+- **Metadata validation**: host-side (numpy) and separate from the traced transforms, so
+  `validate_zmatrix` raises clear errors at setup without breaking jit
+- **Defensive boundary checks**: validate at every public entry point and fail loudly. A
+  wrong answer that looks right is worse than an exception
 - **Testing**: each energy term validated against an isolated single-force OpenMM system, not the force group API
 
 ## Invariants
@@ -85,10 +99,12 @@ Breaking any of these will break downstream users:
 ## Dev commands
 
 ```bash
-# Environment
-conda activate chemistry
+# Environment: any env with jax, numpy, jaxopt, openmm, openmmtools, pytest.
+# The env name is machine specific, so check what you have rather than
+# assuming one: `conda env list`, then verify with
+#   python -c "import jax, openmm, openmmtools, jaxopt"
 
-# Run all tests (155 tests, ~44s)
+# Run all tests (215 tests)
 python -m pytest tests/ -v
 
 # Run a single test file
@@ -99,6 +115,9 @@ python -m pytest tests/ -v -k "bond"
 
 # Quick smoke test (fastest subset)
 python -m pytest tests/test_bonds.py tests/test_angles.py tests/test_torsions.py -v
+
+# Internal-coordinate transforms only
+python -m pytest tests/test_coordinates.py -v
 
 # Float64 must be enabled before importing jaxmm
 python -c "import jax; jax.config.update('jax_enable_x64', True); import jaxmm; print('OK')"
@@ -117,6 +136,49 @@ These are the most common sources of bugs and confusion:
 - **OpenMM Verlet is leapfrog**: `setVelocities` sets v(t-dt/2), not v(t). Pre-kick by -dt/2*F/m to match velocity Verlet.
 - **JIT reordering**: tiny floating-point differences (~1e-10). Use 1e-8 tolerance for JIT consistency tests.
 - **Constraints**: `extract_params` raises `ValueError` for constrained systems. Always use `constraints=None` when building OpenMM systems.
+- **JAX clamps out-of-bounds gathers instead of raising**: an atom index past the end of
+  `positions`, or a z-matrix sized for a different molecule, silently yields a finite,
+  plausible, wrong number. Every public entry point now validates. Static checks (shape,
+  atom count) always run; index-bound checks read values, so they run eagerly and are
+  skipped under jit and vmap where the arrays are tracers. If you add an entry point that
+  gathers by index, add the check.
+- **`log_boltzmann` is the Cartesian density**: for internal-coordinate samples use
+  `log_boltzmann_internal`, which adds `log |det J|`. The term is about -84 nats for
+  alanine dipeptide, roughly 84 kBT. Omitting it is the standard silent error when
+  training a flow in internal coordinates.
+- **Backbone phi and psi are explicit z-matrix torsions**: `torsions[11]` and
+  `torsions[13]` for the shipped ALDP z-matrix, matching `phi_indices` and `psi_indices`.
+  That is why these coordinates suit a flow, and why the sign gotcha below matters.
+- **Z-matrix torsions are the negative of `dihedral_angle`**: `coordinates.py` follows
+  OpenMM, `utils.dihedral_angle` negates to match mdtraj. A Ramachandran plot built from
+  z-matrix torsions without negating is mirrored and looks plausible.
+- **Fixed frame pins the first three atoms**: `zmatrix_to_cartesian` places atom 2
+  relative to atom 1 at an angle measured against atom 0, so `bond_ref[2]` must be 1
+  and `angle_ref[2]` must be 0. `validate_zmatrix` enforces this. Before 2026-09-23 it
+  did not, and a z-matrix with `bond_ref[2] == 0` silently round-tripped to different
+  bond lengths with no error.
+- **Z-matrix references must be distinct**: `angle_ref[i] != bond_ref[i]`, and
+  `torsion_ref[i]` differs from both. A repeated reference leaves the angle or torsion
+  undefined. Also enforced by `validate_zmatrix`, also silently wrong before.
+- **`arccos` has a NaN gradient at 0 and pi**: use `atan2(|u x v|, u . v)` for angles, the
+  same form as `energy.py:angle_energy`. This is the angle analogue of the
+  `jnp.linalg.norm` rule and bit `cartesian_to_zmatrix` for exactly the same reason.
+- **Internal coordinates are genuinely singular** at zero bond length and at collinear
+  reference triples, where `zmatrix_log_abs_det_jacobian` goes to `-inf`. That is correct.
+  Do not clamp it. Note `sin(pi)` is 1.2e-16 rather than 0 in float64, so the divergence
+  shows up as a limit rather than an exact `-inf` at exactly pi.
+- **`lax.fori_loop` traces its body even when the trip count is zero**, so a triatomic
+  (`n_atoms == 3`, empty torsion array) needs an explicit early return, not just a loop
+  that happens not to run.
+- **Five copies of the dihedral formula exist on purpose**: three in `energy.py`, one in
+  `utils.py`, one in `coordinates.py`. `utils.dihedral_angle` negates to match the
+  biochemistry/mdtraj convention; the rest match OpenMM's `PeriodicTorsionForce`. Do not
+  unify them.
+- **A stray top-level `tests` package can shadow this repo's**: test files import
+  `from conftest import ...`, not `from tests.conftest import ...`. `tests/` has no
+  `__init__.py`, so it is only a namespace portion, and any regular `tests` package
+  elsewhere on `sys.path` (an editable install of an unrelated project, for example) wins
+  outright. A `pythonpath` setting does not fix that; the plain `conftest` import does.
 - **GBSA OBC variant**: openmmtools `AlanineDipeptideImplicit` uses `CustomGBForce` with OBC1 tanh parameters (alpha=0.8, beta=0, gamma=2.909125), not OBC2 or `GBSAOBCForce`.
 
 ## How to add a new energy term
@@ -139,11 +201,12 @@ To orient in the codebase, read in this order:
 1. `README.md` -- what it does, quick start, API overview
 2. `CONTRIBUTING.md` -- architecture, patterns, how to add features
 3. `CODEMAP.md` -- structural overview, dependency graph
-4. `jaxmm/__init__.py` -- public API at a glance (40 exports)
+4. `jaxmm/__init__.py` -- public API at a glance (44 exports)
 5. `jaxmm/energy.py` (first 100 lines) -- energy function pattern
 6. `jaxmm/extract.py` (first 100 lines) -- parameter dataclass pattern
-7. `tests/conftest.py` (first 80 lines) -- test fixture setup
-8. `examples/quickstart.ipynb` -- working example code
+7. `jaxmm/coordinates.py` (module docstring) -- fixed-frame conventions and singularities
+8. `tests/conftest.py` (first 80 lines) -- test fixture setup
+9. `examples/quickstart.ipynb` -- working example code
 
 ## Scope and limitations
 
@@ -151,3 +214,5 @@ To orient in the codebase, read in this order:
 - No neighbor lists, no PME/Ewald, no long-range dispersion correction
 - No force field parameter assignment (OpenMM handles this)
 - No explicit solvent (implicit solvent via GBSA is supported)
+- Internal coordinates are fixed-frame only: no free rigid-body degrees of freedom,
+  so the map covers molecular shape, not absolute position or orientation

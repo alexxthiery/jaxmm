@@ -32,24 +32,26 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 | `jaxmm/extract.py` | Dataclasses + extraction from OpenMM + backbone indices | openmm (import-time: jax, numpy only) |
 | `jaxmm/energy.py` | Energy functions | jax, extract.py (dataclass types only) |
 | `jaxmm/integrate.py` | Verlet, Langevin BAOAB, and `baoab_step` (single-step building block) | jax, energy.py |
-| `jaxmm/utils.py` | minimize_energy, log_boltzmann, dihedral angles, unit constants, serialization | energy.py, numpy, jaxopt |
+| `jaxmm/utils.py` | minimize_energy, log_boltzmann, log_boltzmann_internal, dihedral angles, unit constants, serialization | energy.py, coordinates.py, numpy, jaxopt |
+| `jaxmm/coordinates.py` | Fixed-frame z-matrix transforms, log Jacobian, ALDP z-matrix | jax, numpy, `_check_x64` from energy.py, `_register_pytree` from extract.py |
 | `jaxmm/notebook.py` | Jupyter helpers: 3D viz, Ramachandran, free energy estimation | matplotlib, py3Dmol, openmm (all lazy) |
 | `tests/conftest.py` | ALDP fixtures (vacuum + implicit) + OpenMM reference helpers | openmm, openmmtools, jaxmm |
 
 ### Entry points
 
 - **Library**: `import jaxmm; params = jaxmm.extract_params(system)`
-- **Tests**: `python -m pytest tests/ -v` (155 tests, ~44s)
+- **Tests**: `python -m pytest tests/ -v` (215 tests)
 - **Notebooks**: `examples/quickstart.ipynb` (start here), plus 9 topic notebooks
 - **Demo**: `examples/jaxmm_demo.ipynb` (chemistry kernel)
 
 ### Dev commands
 
 ```bash
-# Environment
-conda activate chemistry
+# Environment: any env with jax, numpy, jaxopt, openmm, openmmtools, pytest.
+# The env name is machine specific. Check with `conda env list`, then verify:
+#   python -c "import jax, openmm, openmmtools, jaxopt"
 
-# Run all tests (155 tests, ~44s)
+# Run all tests (215 tests)
 python -m pytest tests/ -v
 
 # Run a single test file
@@ -80,6 +82,8 @@ jax.config.update("jax_enable_x64", True)
 - Batch eval: `jax.vmap(jaxmm.total_energy, in_axes=(0, None))`
 - Test validation: each energy term tested against an isolated OpenMM force
 - Integrators use nested `jax.lax.scan`: inner scan for stepping, outer scan for trajectory saving
+- Metadata validation is host-side numpy and separate from the traced transforms, so it can
+  raise clear errors at setup without breaking jit (see `validate_zmatrix` in `coordinates.py`)
 
 ## Invariants
 
@@ -93,7 +97,11 @@ These must stay true. Breaking any of them will break downstream users.
 
 4. **Units.** Positions in nm. Energies in kJ/mol. Angles in radians. Charges in elementary charge units. These match OpenMM's internal unit system.
 
-5. **Gradient safety.** Energy functions must produce finite gradients for any physically reasonable configuration. Avoid `jnp.linalg.norm` on vectors that can be zero (use `jnp.sqrt(r_sq + 1e-30)` instead).
+5. **Gradient safety.** Energy functions and coordinate transforms must produce finite gradients for any physically reasonable configuration. Avoid `jnp.linalg.norm` on vectors that can be zero (use `jnp.sqrt(r_sq + 1e-30)` instead) and avoid `arccos` for angles (use `atan2(|u x v|, u . v)` instead).
+
+6. **Validate at every public entry point.** Static checks (position shape, atom count, internal-coordinate lengths) always run and survive jit. Index-bound checks need concrete values, so they run eagerly and are skipped under jit and vmap. Use `_check_positions_shape`, `_check_atom_count` and `_check_atom_indices` in `energy.py`; do not write a new ad hoc check.
+
+7. **Loud rejection over silent wrongness.** If a configuration cannot be represented faithfully, raise with a message naming the offending index. `validate_zmatrix` exists because a z-matrix the transform could not honour used to be accepted and then silently reconstructed in the wrong place.
 
 ## How to add a new energy term
 
@@ -169,6 +177,9 @@ All 155+ tests must pass before merging.
 - **Multi-frame**: test across MD frames, not just the minimized configuration. MD frames expose edge cases (close contacts, extreme torsion angles).
 - **Gradient check**: every energy function must have a test that `jax.grad` produces no NaN/Inf.
 - **JIT check**: every energy function must have a test that `jax.jit(fn)` matches the non-jit result.
+- **Independent oracles**: prefer an oracle the implementation cannot trivially satisfy. For the coordinate transforms that means `jacfwd` + `slogdet` for the Jacobian, the OpenMM topology bond graph for the ALDP z-matrix, and rigid-motion invariance plus distance-matrix preservation for `canonicalize_cartesian`. Idempotence alone is too weak: a wrong frame construction satisfies it.
+- **Validation tests**: every entry point that gathers by index needs a test that a stale index raises rather than clamping. See `tests/test_validation.py`.
+- **Mutation check**: after adding tests for a fix, revert the fix and confirm the tests go red. A test that cannot fail is not evidence.
 - **Tolerances**: bonds/angles/RB torsions 1e-4 kJ/mol, periodic torsions 1e-3, nonbonded 1e-3, GBSA 1e-3, CMAP 0.5 (bilinear interpolation limit), PBC nonbonded 1e-4, total 1e-3, gradients 1e-2 (CMMotionRemover residual).
 
 ## Gotchas
@@ -182,6 +193,16 @@ development experience.
 
 **NaN gradients from `jnp.linalg.norm`.** When the input vector can be zero (e.g., self-distance on the diagonal), `jnp.linalg.norm` returns 0 but its gradient is NaN. Use `jnp.sqrt(jnp.sum(x**2) + 1e-30)` instead. The epsilon does not affect forward-pass accuracy but keeps gradients finite.
 
+**JAX clamps out-of-bounds gathers.** `positions[idx]` with `idx >= n_atoms` returns the last row rather than raising, so parameters built for a larger system produce a finite, plausible, wrong energy. This is the single most dangerous failure mode in the codebase because nothing looks wrong. Every public entry point validates; keep it that way when adding one.
+
+**NaN gradients from `arccos`.** `arccos` has an infinite derivative at both ends of its domain, so clipping the cosine to `[-1, 1]` makes the forward pass safe and leaves the gradient NaN at exactly 0 and pi. Use `atan2(|u x v|, u . v)`, which is also scale free so the input vectors need no normalization. This is the angle analogue of the `jnp.linalg.norm` rule above and bit `cartesian_to_zmatrix` for the same reason.
+
+**`lax.fori_loop` traces its body even when the trip count is zero.** A loop from 3 to 3 still traces, so indexing an empty array inside it raises `IndexError` rather than being skipped. Guard with an explicit early return when the degenerate size is legal, as `zmatrix_to_cartesian` does for triatomics.
+
+**Internal coordinates are genuinely singular** at zero bond length and at collinear reference triples, where `zmatrix_log_abs_det_jacobian` diverges to `-inf`. That is correct behavior for the coordinate system, not a bug to clamp. Note that `sin(pi)` evaluates to 1.2e-16 rather than 0 in float64, so tests should assert the divergence as a limit rather than comparing against `-inf` at exactly pi.
+
+**Five copies of the dihedral formula exist on purpose.** Three in `energy.py` (periodic torsions, RB torsions, CMAP), one in `utils.py`, one in `coordinates.py`. `utils.dihedral_angle` negates to match the biochemistry/mdtraj convention; the others match OpenMM's `PeriodicTorsionForce`. Unifying them would silently flip a sign somewhere. Leave them alone.
+
 **JIT causes tiny floating-point reordering.** JIT-compiled functions may produce results differing by ~1e-10 from non-JIT. Use 1e-8 tolerance for JIT consistency tests.
 
 **CMAP bilinear interpolation limit.** `jax.scipy.ndimage.map_coordinates` only supports order<=1 (no bicubic). CMAP uses bilinear interpolation, resulting in ~0.13 kJ/mol difference vs OpenMM on 6x6 grids. This is a known JAX limitation.
@@ -191,6 +212,10 @@ development experience.
 **Frozen dataclass not JIT-compatible by default.** JAX needs to know how to flatten/unflatten your dataclass. Call `_register_pytree(YourClass)` after defining it. Non-array fields (int, str) must go in `aux_field_names`.
 
 **Optional fields need custom flatten/unflatten.** `ForceFieldParams` has optional fields (gbsa, rb_torsions, cmap, restraints) that can be `None`. The standard `_register_pytree` cannot handle `None` children; these use a custom `tree_flatten`/`tree_unflatten` pair. See the `ForceFieldParams` registration in `extract.py`.
+
+### Test collection
+
+**A stray top-level `tests` package can shadow this repo's.** Test files import `from conftest import ...`, not `from tests.conftest import ...`. `tests/` has no `__init__.py`, so it is only a namespace portion, and Python's `PathFinder` gives an unconditional win to any regular `tests` package (one with `__init__.py`) found anywhere on `sys.path`, such as an editable install of an unrelated project. Path ordering does not help and neither does a `pythonpath` setting; importing `conftest` directly does, because pytest's default prepend import mode puts `<repo>/tests` at `sys.path[0]`.
 
 ### OpenMM
 
