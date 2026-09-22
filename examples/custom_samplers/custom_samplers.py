@@ -16,7 +16,7 @@
 # # Building Custom Samplers with baoab_step
 #
 # jaxmm exposes `baoab_step` as a building block for constructing custom
-# sampling algorithms. This notebook shows two examples:
+# sampling algorithms. This example shows two:
 #
 # 1. **Simulated tempering**: a single replica that adaptively changes
 #    temperature, avoiding the cost of running many replicas.

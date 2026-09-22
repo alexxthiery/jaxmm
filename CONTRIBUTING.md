@@ -40,11 +40,13 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 ### Entry points
 
 - **Library**: `import jaxmm; params = jaxmm.extract_params(system)`
-- **Tests**: `python -m pytest tests/ -v` (306 tests, 93% branch coverage)
-- **Examples**: `examples/quickstart.py` (start here), plus 10 topic scripts. These are
-  jupytext "percent" Python, not notebooks; `# %%` marks a cell. Run them directly or
-  open them as notebooks with jupytext installed. Do not commit `.ipynb`.
-- **Demo**: `examples/jaxmm_demo.py`
+- **Tests**: `python -m pytest tests/ -v` (324 tests, 93% branch coverage)
+- **Examples**: `examples/quickstart/quickstart.py` (start here), plus 10 topic folders.
+  Each is a jupytext "percent" script with a generated README and a gitignored
+  `output/`. Run them directly, or open as notebooks with jupytext installed. Do not
+  commit `.ipynb` or figures. After editing an example's leading markdown cell, run
+  `python tools/sync_example_docs.py`; a test fails if the READMEs are stale.
+- **Demo**: `examples/jaxmm_demo/jaxmm_demo.py`
 
 ### Dev commands
 
@@ -53,7 +55,7 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 # The env name is machine specific. Check with `conda env list`, then verify:
 #   python -c "import jax, openmm, openmmtools, jaxopt"
 
-# Run all tests (306 tests; 8 skip without py3Dmol)
+# Run all tests (324 tests; 2 skip without py3Dmol)
 python -m pytest tests/ -v
 
 # Run a single test file

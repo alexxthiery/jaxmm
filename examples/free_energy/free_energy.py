@@ -16,7 +16,7 @@
 # # Free Energy Estimation
 #
 # Estimate the free energy surface of alanine dipeptide from MD sampling.
-# This notebook covers:
+# This example covers:
 # - Histogram-based free energy from Langevin MD
 # - Convergence analysis: how much sampling is enough?
 # - `log_boltzmann_regularized` for handling high-energy configurations

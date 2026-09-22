@@ -29,3 +29,6 @@ build/
 
 # Audit workspace (local only)
 audit/
+
+# Example output (regenerate with tools/render_examples.py)
+examples/*/output/

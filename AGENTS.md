@@ -84,9 +84,13 @@ touches no energy term and borrows only private helpers (`_check_x64`,
   `validate_zmatrix` raises clear errors at setup without breaking jit
 - **Defensive boundary checks**: validate at every public entry point and fail loudly. A
   wrong answer that looks right is worse than an exception
-- **Examples are plain Python**: `examples/*.py` in jupytext percent format, where
-  `# %%` marks a cell. Edit them like any Python file. Do not add `.ipynb`;
-  `tests/test_examples.py` fails if one appears
+- **Examples are plain Python in one folder each**: `examples/<name>/<name>.py` in
+  jupytext percent format, where `# %%` marks a cell. Edit them like any Python file.
+  Do not add `.ipynb` or commit figures; `tests/test_examples.py` fails if one appears
+- **Example READMEs are generated**, not written: `tools/sync_example_docs.py` derives
+  them from each script's leading markdown cell. Edit the cell, then rerun the tool.
+  Figures come from `tools/render_examples.py`, which redirects `plt.show` to
+  `savefig` so the examples themselves stay unchanged
 - **Testing**: each energy term validated against an isolated single-force OpenMM system, not the force group API
 
 ## Invariants
@@ -107,7 +111,7 @@ Breaking any of these will break downstream users:
 # assuming one: `conda env list`, then verify with
 #   python -c "import jax, openmm, openmmtools, jaxopt"
 
-# Run all tests (306 tests; 8 skip without py3Dmol)
+# Run all tests (324 tests; 2 skip without py3Dmol)
 python -m pytest tests/ -v
 
 # Run a single test file
@@ -209,7 +213,7 @@ To orient in the codebase, read in this order:
 6. `jaxmm/extract.py` (first 100 lines) -- parameter dataclass pattern
 7. `jaxmm/coordinates.py` (module docstring) -- fixed-frame conventions and singularities
 8. `tests/conftest.py` (first 80 lines) -- test fixture setup
-9. `examples/quickstart.py` -- jupytext percent format, read as plain Python
+9. `examples/quickstart/quickstart.py` -- jupytext percent format, plain Python
 
 ## Scope and limitations
 

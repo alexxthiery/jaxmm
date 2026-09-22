@@ -196,7 +196,7 @@ tests/
   test_coordinates.py  z-matrix transforms, Jacobian, gradient safety, density (57 tests)
   test_validation.py   defensive input validation across energy terms (12 tests)
   test_notebook.py     free energy, backbone angles, PDB writer (11 tests)
-  test_examples.py     examples compile, use real API, one runs (64 tests)
+  test_examples.py     examples compile, use real API, docs in sync, one runs (82 tests)
 examples/
   quickstart.py           core API in 5 minutes
   energy_landscape.py     PES visualization, free energy surfaces, basin analysis
@@ -213,24 +213,31 @@ examples/
 
 ## Examples
 
-`examples/` holds jupytext "percent" Python, not notebooks. A `# %%` comment marks a
-cell boundary.
+Each example is a self-contained folder under `examples/`: a jupytext "percent"
+Python script, a README, and a gitignored `output/` for figures. See
+[examples/README.md](examples/README.md) for the index.
 
 ```bash
-python examples/quickstart.py                      # just run it
-jupytext --to ipynb examples/quickstart.py         # convert to a notebook
-pip install -e ".[examples]"                       # matplotlib, py3Dmol, jupytext
+pip install -e ".[examples]"                      # matplotlib, py3Dmol, jupytext
+python examples/quickstart/quickstart.py          # run one
+python tools/render_examples.py                   # run all, save figures
+python tools/render_examples.py --only quickstart # just one
 ```
 
-With jupytext installed, Jupyter and VS Code open these `.py` files directly as
-notebooks, so no `.ipynb` needs to exist. Notebooks are deliberately not committed:
-stored outputs are base64 blobs that bloated this directory to ten times the size of
-the library and produced diffs nobody could review. The trade is that GitHub does not
-render figures for them; run an example to see its output.
+These are plain Python, not notebooks. `# %%` marks a cell, so Jupyter and VS Code
+open them as notebooks with jupytext installed, and they also run as ordinary
+scripts. Notebooks are deliberately not committed: stored outputs are base64 blobs
+that bloated this directory to ten times the size of the library and produced diffs
+nobody could review.
 
-Because they are plain Python, the examples are tested. `tests/test_examples.py` walks
-each one's AST and fails if it references a jaxmm function that no longer exists, and
-runs one end to end.
+Figures are not committed either. The examples draw 35 of them, about 40 KB each,
+so committing them would restore roughly the 1.2 MB the notebooks cost. Run the
+renderer to produce them locally; it redirects `plt.show()` to `savefig` so the
+examples need no changes.
+
+Because they are plain Python, the examples are tested. `tests/test_examples.py`
+walks each one's AST and fails if it references a jaxmm function that no longer
+exists, checks the generated READMEs are in sync, and runs one end to end.
 
 ## Tests
 
@@ -238,7 +245,7 @@ runs one end to end.
 python -m pytest tests/ -v
 ```
 
-306 tests (298 run, 8 skip without py3Dmol). Energy terms validated against OpenMM on alanine dipeptide (22 atoms) across 50 MD frames for both vacuum and implicit solvent systems. Integrators validated against OpenMM trajectories and statistical mechanics (equipartition, harmonic variance).
+324 tests (322 run, 2 skip without py3Dmol). Energy terms validated against OpenMM on alanine dipeptide (22 atoms) across 50 MD frames for both vacuum and implicit solvent systems. Integrators validated against OpenMM trajectories and statistical mechanics (equipartition, harmonic variance).
 
 ## Validation summary
 

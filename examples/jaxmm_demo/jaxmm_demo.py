@@ -15,7 +15,7 @@
 # %% [markdown]
 # # jaxmm Demo: Pure JAX Molecular Potential Energy
 #
-# This notebook demonstrates jaxmm, a pure JAX replacement for OpenMM's energy evaluation.
+# This example demonstrates jaxmm, a pure JAX replacement for OpenMM's energy evaluation.
 # OpenMM is used once to define the molecule and assign force field parameters. At runtime,
 # energy evaluation is pure JAX: jittable, vmappable, and differentiable via jax.grad.
 #

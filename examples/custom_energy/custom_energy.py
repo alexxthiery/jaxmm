@@ -19,7 +19,7 @@
 # custom terms and the result is still compatible with `jax.jit`, `jax.grad`,
 # and `jax.vmap`.
 #
-# This notebook demonstrates:
+# This example demonstrates:
 # - Position restraints via `make_restraints`
 # - Custom dihedral bias potentials
 # - Umbrella sampling along phi with PMF estimation
