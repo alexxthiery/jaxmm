@@ -15,7 +15,7 @@ import jax.numpy as jnp
 import jaxopt
 
 from jaxmm.extract import ForceFieldParams
-from jaxmm.energy import total_energy
+from jaxmm.energy import total_energy, _check_x64
 
 # Boltzmann constant in kJ/(mol*K)
 KB = 8.314462618e-3
@@ -154,6 +154,7 @@ def dihedral_angle(positions: jax.Array, indices: jax.Array) -> jax.Array:
     Returns:
         Dihedral angles in radians, shape (n_dihedrals,) or (n_frames, n_dihedrals).
     """
+    _check_x64()
     single = positions.ndim == 2
     if single:
         positions = positions[jnp.newaxis]  # (1, n_atoms, 3)

@@ -6,6 +6,7 @@ Compatible with jax.jit, jax.vmap, and jax.grad.
 
 import jax
 import jax.numpy as jnp
+import numpy as np
 
 from jaxmm.extract import (
     BondParams,
@@ -30,16 +31,89 @@ def _check_x64():
         )
 
 
+def _check_positions_shape(positions, term):
+    """Raise unless positions has shape (..., n_atoms, 3).
+
+    Args:
+        positions: Candidate coordinate array.
+        term: Name of the calling energy term, used in the message.
+
+    Raises:
+        ValueError: If the array is not at least 2D with a trailing axis of 3.
+    """
+    if jnp.ndim(positions) < 2:
+        raise ValueError(
+            f"{term}: positions must have shape (..., n_atoms, 3), got "
+            f"{jnp.shape(positions)}."
+        )
+    if positions.shape[-1] != 3:
+        raise ValueError(
+            f"{term}: positions last dimension is {positions.shape[-1]}, "
+            "expected 3 (x, y, z)."
+        )
+
+
+def _check_atom_count(positions, n_atoms, term):
+    """Raise unless positions holds exactly n_atoms atoms.
+
+    Used where the atom count is known statically, so the check costs nothing
+    and survives jit.
+
+    Args:
+        positions: Atom coordinates.
+        n_atoms: Atom count the parameters describe.
+        term: Name of the calling energy term, used in the message.
+
+    Raises:
+        ValueError: On a shape or count mismatch.
+    """
+    _check_positions_shape(positions, term)
+    if positions.shape[-2] != n_atoms:
+        raise ValueError(
+            f"{term}: positions has {positions.shape[-2]} atoms but parameters "
+            f"describe {n_atoms}. Check that positions matches the system."
+        )
+
+
+def _check_atom_indices(positions, arrays, term):
+    """Raise if any atom index falls outside positions.
+
+    JAX clamps an out-of-bounds gather to the last valid element instead of
+    raising, so a parameter set built for a larger system silently yields a
+    finite, wrong energy. Index values are only readable when they are
+    concrete, so this runs eagerly and is skipped under jit and vmap, where the
+    static shape checks are all that remain.
+
+    Args:
+        positions: Atom coordinates, shape (..., n_atoms, 3).
+        arrays: Sequence of (name, index_array) pairs to bounds check.
+        term: Name of the calling energy term, used in the message.
+
+    Raises:
+        ValueError: If any index is negative or >= n_atoms.
+    """
+    n_atoms = positions.shape[-2]
+    for name, array in arrays:
+        if isinstance(array, jax.core.Tracer) or array.size == 0:
+            continue
+        values = np.asarray(array)
+        highest, lowest = int(values.max()), int(values.min())
+        if highest >= n_atoms or lowest < 0:
+            offender = highest if highest >= n_atoms else lowest
+            raise ValueError(
+                f"{term}: {name} references atom {offender} but positions has "
+                f"{n_atoms} atoms (valid indices 0 to {n_atoms - 1}). JAX would "
+                "clamp this to a valid index and return a wrong energy."
+            )
+
+
 def _check_positions(positions, params):
     """Raise if positions shape does not match params.n_atoms."""
+    _check_positions_shape(positions, "energy")
     if positions.shape[-2] != params.n_atoms:
         raise ValueError(
             f"positions has {positions.shape[-2]} atoms but params expects "
             f"{params.n_atoms}. Check that positions matches the system."
-        )
-    if positions.shape[-1] != 3:
-        raise ValueError(
-            f"positions last dimension is {positions.shape[-1]}, expected 3 (x, y, z)."
         )
 
 # Coulomb constant in OpenMM units: kJ*nm/(mol*e^2)
@@ -63,6 +137,9 @@ def bond_energy(positions: jax.Array, params: BondParams) -> jax.Array:
         Total bond energy in kJ/mol.
     """
     _check_x64()
+    _check_positions_shape(positions, "bond_energy")
+    _check_atom_indices(positions, (("atom_i", params.atom_i),
+                                    ("atom_j", params.atom_j)), "bond_energy")
     ri = positions[params.atom_i]  # (n_bonds, 3)
     rj = positions[params.atom_j]  # (n_bonds, 3)
     dr = ri - rj
@@ -84,6 +161,10 @@ def angle_energy(positions: jax.Array, params: AngleParams) -> jax.Array:
         Total angle energy in kJ/mol.
     """
     _check_x64()
+    _check_positions_shape(positions, "angle_energy")
+    _check_atom_indices(positions, (("atom_i", params.atom_i),
+                                    ("atom_j", params.atom_j),
+                                    ("atom_k", params.atom_k)), "angle_energy")
     ri = positions[params.atom_i]
     rj = positions[params.atom_j]  # central atom
     rk = positions[params.atom_k]
@@ -115,6 +196,11 @@ def torsion_energy(positions: jax.Array, params: TorsionParams) -> jax.Array:
         Total torsion energy in kJ/mol.
     """
     _check_x64()
+    _check_positions_shape(positions, "torsion_energy")
+    _check_atom_indices(positions, (("atom_i", params.atom_i),
+                                    ("atom_j", params.atom_j),
+                                    ("atom_k", params.atom_k),
+                                    ("atom_l", params.atom_l)), "torsion_energy")
     ri = positions[params.atom_i]
     rj = positions[params.atom_j]
     rk = positions[params.atom_k]
@@ -159,6 +245,11 @@ def rb_torsion_energy(positions: jax.Array, params: RBTorsionParams) -> jax.Arra
         Total RB torsion energy in kJ/mol.
     """
     _check_x64()
+    _check_positions_shape(positions, "rb_torsion_energy")
+    _check_atom_indices(positions, (("atom_i", params.atom_i),
+                                    ("atom_j", params.atom_j),
+                                    ("atom_k", params.atom_k),
+                                    ("atom_l", params.atom_l)), "rb_torsion_energy")
     ri = positions[params.atom_i]
     rj = positions[params.atom_j]
     rk = positions[params.atom_k]
@@ -200,6 +291,9 @@ def cmap_energy(positions: jax.Array, params: CmapParams) -> jax.Array:
         Total CMAP correction energy in kJ/mol.
     """
     _check_x64()
+    _check_positions_shape(positions, "cmap_energy")
+    _check_atom_indices(positions, (("phi_atoms", params.phi_atoms),
+                                    ("psi_atoms", params.psi_atoms)), "cmap_energy")
     size = params.map_size
 
     def _dihedral(atoms):
@@ -248,6 +342,9 @@ def restraint_energy(positions: jax.Array, params: RestraintParams) -> jax.Array
         Total restraint energy in kJ/mol.
     """
     _check_x64()
+    _check_positions_shape(positions, "restraint_energy")
+    _check_atom_indices(
+        positions, (("atom_indices", params.atom_indices),), "restraint_energy")
     dr = positions[params.atom_indices] - params.reference_positions
     return 0.5 * jnp.sum(params.k[:, None] * dr**2)
 
@@ -384,6 +481,7 @@ def nonbonded_energy(positions: jax.Array, params: NonbondedParams) -> jax.Array
         Total nonbonded energy in kJ/mol.
     """
     _check_x64()
+    _check_atom_count(positions, params.n_atoms, "nonbonded_energy")
     dist, _ = _distance_matrix(positions)
     return _nonbonded_energy_with_dist(params, dist)
 
@@ -562,6 +660,7 @@ def gbsa_energy(positions: jax.Array, params: GBSAParams) -> jax.Array:
         Total GBSA solvation energy in kJ/mol.
     """
     _check_x64()
+    _check_atom_count(positions, params.charges.shape[0], "gbsa_energy")
     dist, dist_sq = _distance_matrix(positions)
     return _gbsa_energy_with_dist(positions, params, dist, dist_sq)
 
