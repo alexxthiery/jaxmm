@@ -196,19 +196,41 @@ tests/
   test_coordinates.py  z-matrix transforms, Jacobian, gradient safety, density (57 tests)
   test_validation.py   defensive input validation across energy terms (12 tests)
   test_notebook.py     free energy, backbone angles, PDB writer (11 tests)
+  test_examples.py     examples compile, use real API, one runs (64 tests)
 examples/
-  quickstart.ipynb           core API in 5 minutes
-  energy_landscape.ipynb     PES visualization, free energy surfaces, basin analysis
-  differentiable_md.ipynb    gradients through MD, Hessian, parameter sensitivity
-  custom_energy.ipynb        restraints, dihedral bias, umbrella sampling + WHAM
-  normal_modes.ipynb         Hessian eigendecomposition, vibrational frequencies
-  solvent_comparison.ipynb   vacuum vs implicit solvent side-by-side
-  free_energy.ipynb          histogram FES, convergence, log_boltzmann_regularized
-  custom_samplers.ipynb      simulated tempering, HMC via baoab_step
-  jaxmm_demo.ipynb           energy comparison, vmap, gradients, timing, MD
-  parallel_tempering.ipynb   replica exchange MD, Ramachandran comparison
-  aldp_potential_jaxmm.ipynb jaxmm version of aldp_potential
+  quickstart.py           core API in 5 minutes
+  energy_landscape.py     PES visualization, free energy surfaces, basin analysis
+  differentiable_md.py    gradients through MD, Hessian, parameter sensitivity
+  custom_energy.py        restraints, dihedral bias, umbrella sampling + WHAM
+  normal_modes.py         Hessian eigendecomposition, vibrational frequencies
+  solvent_comparison.py   vacuum vs implicit solvent side-by-side
+  free_energy.py          histogram FES, convergence, log_boltzmann_regularized
+  custom_samplers.py      simulated tempering, HMC via baoab_step
+  jaxmm_demo.py           energy comparison, vmap, gradients, timing, MD
+  parallel_tempering.py   replica exchange MD, Ramachandran comparison
+  aldp_potential_jaxmm.py jaxmm version of aldp_potential
 ```
+
+## Examples
+
+`examples/` holds jupytext "percent" Python, not notebooks. A `# %%` comment marks a
+cell boundary.
+
+```bash
+python examples/quickstart.py                      # just run it
+jupytext --to ipynb examples/quickstart.py         # convert to a notebook
+pip install -e ".[examples]"                       # matplotlib, py3Dmol, jupytext
+```
+
+With jupytext installed, Jupyter and VS Code open these `.py` files directly as
+notebooks, so no `.ipynb` needs to exist. Notebooks are deliberately not committed:
+stored outputs are base64 blobs that bloated this directory to ten times the size of
+the library and produced diffs nobody could review. The trade is that GitHub does not
+render figures for them; run an example to see its output.
+
+Because they are plain Python, the examples are tested. `tests/test_examples.py` walks
+each one's AST and fails if it references a jaxmm function that no longer exists, and
+runs one end to end.
 
 ## Tests
 
@@ -216,7 +238,7 @@ examples/
 python -m pytest tests/ -v
 ```
 
-242 tests (240 run, 2 skip without py3Dmol). Energy terms validated against OpenMM on alanine dipeptide (22 atoms) across 50 MD frames for both vacuum and implicit solvent systems. Integrators validated against OpenMM trajectories and statistical mechanics (equipartition, harmonic variance).
+306 tests (298 run, 8 skip without py3Dmol). Energy terms validated against OpenMM on alanine dipeptide (22 atoms) across 50 MD frames for both vacuum and implicit solvent systems. Integrators validated against OpenMM trajectories and statistical mechanics (equipartition, harmonic variance).
 
 ## Validation summary
 
@@ -261,7 +283,8 @@ This library computes potential energy (vacuum, implicit solvent, or periodic sy
 
 ## Notebook utilities
 
-`jaxmm.notebook` provides reusable helpers for Jupyter notebooks. Not re-exported by `jaxmm.__init__`; import explicitly:
+`jaxmm.notebook` provides reusable helpers for interactive work (Jupyter, or an
+example opened as a notebook). Not re-exported by `jaxmm.__init__`; import explicitly:
 
 ```python
 from jaxmm.notebook import show_structure, animate_trajectory, plot_ramachandran

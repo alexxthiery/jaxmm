@@ -18,7 +18,7 @@ jaxmm/                  # core library (~2802 lines, 6 modules excluding noteboo
   utils.py               minimize, log_boltzmann, dihedrals, serialization, constants (461 lines)
   coordinates.py         fixed-frame z-matrix transforms + log Jacobian (397 lines)
   notebook.py            Jupyter helpers: viz, Ramachandran, free energy (297 lines, not re-exported)
-tests/                   # 242 tests
+tests/                   # 306 tests
   conftest.py            ALDP fixtures (vacuum + implicit), OpenMM reference helpers
   test_extraction.py     param shapes/values/validation (24 tests)
   test_bonds.py          bond energy vs OpenMM (5)
@@ -38,18 +38,19 @@ tests/                   # 242 tests
   test_coordinates.py    z-matrix transforms, Jacobian vs autodiff, gradient safety, density (57)
   test_validation.py     defensive input validation across energy terms (12)
   test_notebook.py       free energy vs analytic Gaussian, angles, PDB writer (11)
-examples/                # 11 Jupyter notebooks
-  quickstart.ipynb           core API in 5 minutes
-  energy_landscape.ipynb     PES visualization, free energy surfaces
-  differentiable_md.ipynb    gradients through MD, Hessian, parameter sensitivity
-  custom_energy.ipynb        restraints, dihedral bias, umbrella sampling
-  normal_modes.ipynb         Hessian eigendecomposition, vibrational frequencies
-  solvent_comparison.ipynb   vacuum vs implicit solvent side-by-side
-  free_energy.ipynb          histogram FES, convergence, log_boltzmann_regularized
-  custom_samplers.ipynb      simulated tempering, HMC via baoab_step
-  jaxmm_demo.ipynb           energy comparison, vmap, gradients, timing, MD
-  parallel_tempering.ipynb   replica exchange MD, Ramachandran comparison
-  aldp_potential_jaxmm.ipynb jaxmm version of classic ALDP exploration
+  test_examples.py       examples compile, reference real API, one runs (64)
+examples/                # 11 jupytext "percent" scripts (# %% cells), no .ipynb
+  quickstart.py           core API in 5 minutes
+  energy_landscape.py     PES visualization, free energy surfaces
+  differentiable_md.py    gradients through MD, Hessian, parameter sensitivity
+  custom_energy.py        restraints, dihedral bias, umbrella sampling
+  normal_modes.py         Hessian eigendecomposition, vibrational frequencies
+  solvent_comparison.py   vacuum vs implicit solvent side-by-side
+  free_energy.py          histogram FES, convergence, log_boltzmann_regularized
+  custom_samplers.py      simulated tempering, HMC via baoab_step
+  jaxmm_demo.py           energy comparison, vmap, gradients, timing, MD
+  parallel_tempering.py   replica exchange MD, Ramachandran comparison
+  aldp_potential_jaxmm.py jaxmm version of classic ALDP exploration
 ```
 
 ## Module dependency graph
@@ -123,9 +124,9 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 ## Entry points
 
 - **Library**: `import jaxmm; params = jaxmm.extract_params(system)`
-- **Tests**: `python -m pytest tests/ -v` (242 tests, 93% branch coverage)
-- **Notebooks**: `examples/quickstart.ipynb` (start here)
-- **Demo**: `examples/jaxmm_demo.ipynb`
+- **Tests**: `python -m pytest tests/ -v` (306 tests, 93% branch coverage)
+- **Examples**: `examples/quickstart.py` (start here)
+- **Demo**: `examples/jaxmm_demo.py`
 
 ## Patterns
 

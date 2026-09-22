@@ -16,3 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 test = ["pytest>=7.0", "openmm>=8.0", "openmmtools>=0.23"]
+# examples/ are jupytext "percent" Python. jupytext lets Jupyter and VS Code
+# open them as notebooks; matplotlib and py3Dmol back the plotting and 3D
+# viewer helpers in jaxmm.notebook. None of these were declared before.
+examples = ["matplotlib>=3.5", "py3Dmol>=2.0", "jupytext>=1.14"]

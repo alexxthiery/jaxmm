@@ -1,0 +1,10 @@
+# Examples are plain Python in jupytext "percent" format: `# %%` marks a cell.
+#
+# Open one as a notebook:   jupytext --to ipynb examples/quickstart.py
+# Or just run it:           python examples/quickstart.py
+#
+# Jupyter and VS Code open the .py directly as a notebook when jupytext is
+# installed, so no .ipynb needs to exist. Notebooks are deliberately not
+# committed: they carry base64 output that bloats the repo and produces diffs
+# nobody can review.
+default_jupytext_formats = "py:percent"
