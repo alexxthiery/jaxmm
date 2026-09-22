@@ -2,7 +2,6 @@
 
 import jax
 import jax.numpy as jnp
-import jax.random as random
 import numpy as np
 
 from jaxmm.energy import (
@@ -10,7 +9,7 @@ from jaxmm.energy import (
     bond_energy, angle_energy, torsion_energy, nonbonded_energy,
 )
 from jaxmm.utils import log_boltzmann, log_boltzmann_regularized, log_prob, log_prob_regularized, KB
-from tests.conftest import get_openmm_total_energy
+from conftest import get_openmm_total_energy
 
 
 def test_total_energy_initial(aldp_system, aldp_positions, aldp_positions_jnp, aldp_params):

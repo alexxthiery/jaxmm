@@ -6,7 +6,7 @@ import openmm
 
 from jaxmm.energy import torsion_energy
 from jaxmm.extract import TorsionParams
-from tests.conftest import get_openmm_force_energy
+from conftest import get_openmm_force_energy
 
 
 def test_torsion_energy_initial(aldp_system, aldp_positions, aldp_positions_jnp, aldp_params):

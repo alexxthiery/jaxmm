@@ -6,7 +6,7 @@ import numpy as np
 import openmm
 
 from jaxmm.energy import bond_energy
-from tests.conftest import get_openmm_force_energy
+from conftest import get_openmm_force_energy
 
 
 def test_bond_energy_initial(aldp_system, aldp_positions, aldp_positions_jnp, aldp_params):

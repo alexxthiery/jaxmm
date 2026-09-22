@@ -1,7 +1,6 @@
 """Tests for harmonic position restraints."""
 import jax
 import jax.numpy as jnp
-import pytest
 from dataclasses import replace
 
 from jaxmm.extract import make_restraints
@@ -74,7 +73,7 @@ def test_restraint_selective_atoms(aldp_positions_jnp):
     assert abs(e5) < 1e-10
 
 
-def test_restraint_jit(aldp_params, aldp_positions_jnp):
+def test_restraint_jit(aldp_positions_jnp):
     restraints = make_restraints(jnp.arange(5), aldp_positions_jnp[:5] + 0.01, k=100.0)
     ref = float(restraint_energy(aldp_positions_jnp, restraints))
     jit_e = float(jax.jit(restraint_energy)(aldp_positions_jnp, restraints))

@@ -1,5 +1,4 @@
 """Tests for periodic boundary conditions and nonbonded cutoff."""
-import copy
 
 import numpy as np
 import jax
@@ -10,7 +9,7 @@ import pytest
 
 from jaxmm.energy import _minimum_image, _lj_switch
 from jaxmm.extract import extract_params
-from jaxmm.energy import nonbonded_energy, total_energy
+from jaxmm.energy import total_energy
 
 
 def test_minimum_image_orthorhombic():

@@ -5,7 +5,7 @@ import jax.numpy as jnp
 import numpy as np
 
 from jaxmm.energy import total_energy, bond_energy, angle_energy, torsion_energy, nonbonded_energy
-from tests.conftest import get_openmm_forces
+from conftest import get_openmm_forces
 
 
 # ---------------------------------------------------------------------------

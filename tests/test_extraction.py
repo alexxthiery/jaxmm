@@ -1,6 +1,5 @@
 """Tests for parameter extraction from OpenMM system."""
 
-import warnings
 
 import jax
 import jax.numpy as jnp
@@ -201,7 +200,6 @@ def test_positions_shape_error():
     import jaxmm
 
     from openmmtools import testsystems
-    from openmm import unit
 
     aldp = testsystems.AlanineDipeptideVacuum(constraints=None)
     params = jaxmm.extract_params(aldp.system)

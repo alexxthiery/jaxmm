@@ -8,8 +8,8 @@ import numpy as np
 import openmm
 from openmm import unit
 
-from jaxmm.energy import gbsa_energy, _born_radii, _gb_energy, _sa_energy, _distance_matrix, total_energy
-from tests.conftest import get_openmm_force_energy, get_openmm_total_energy, get_openmm_forces
+from jaxmm.energy import gbsa_energy, _born_radii, _distance_matrix, total_energy
+from conftest import get_openmm_total_energy, get_openmm_forces
 
 
 # ---------------------------------------------------------------------------
