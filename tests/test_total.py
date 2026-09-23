@@ -1,5 +1,6 @@
 """Tests for total energy, vmap, utility functions, and physical invariances."""
 
+
 import jax
 import jax.numpy as jnp
 import numpy as np

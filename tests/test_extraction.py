@@ -1,6 +1,7 @@
 """Tests for parameter extraction from OpenMM system."""
 
 
+
 import jax
 import jax.numpy as jnp
 import numpy as np
@@ -119,6 +120,7 @@ def test_toluene_extraction_shapes(toluene_params):
 
 def test_unknown_force_error():
     """extract_params raises on unrecognized force types."""
+    pytest.importorskip("openmm")
     import openmm
     from jaxmm.extract import extract_params
 
@@ -153,6 +155,7 @@ def test_unknown_force_error():
 
 def test_constraint_error():
     """extract_params raises when system has constraints."""
+    pytest.importorskip("openmm")
     import openmm
     from jaxmm.extract import extract_params
 
@@ -167,6 +170,7 @@ def test_constraint_error():
 
 def test_pme_error():
     """extract_params raises when NonbondedForce uses PME."""
+    pytest.importorskip("openmm")
     import openmm
     from jaxmm.extract import extract_params
 
@@ -196,6 +200,7 @@ def test_pme_error():
 
 def test_positions_shape_error():
     """total_energy raises on positions/params atom count mismatch."""
+    pytest.importorskip("openmm")
     import jax.numpy as jnp
     import jaxmm
 
@@ -286,6 +291,7 @@ def test_check_x64_error_message():
 
 def test_extract_params_missing_bond_force():
     """extract_params raises ValueError listing missing forces."""
+    pytest.importorskip("openmm")
     import openmm
     from jaxmm.extract import extract_params
 
@@ -303,6 +309,7 @@ def test_extract_params_missing_bond_force():
 
 def test_extract_params_missing_nonbonded():
     """extract_params ValueError lists NonbondedForce when missing."""
+    pytest.importorskip("openmm")
     import openmm
     from jaxmm.extract import extract_params
 

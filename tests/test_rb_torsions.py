@@ -1,4 +1,12 @@
 """Tests for Ryckaert-Bellemans torsion energy."""
+
+import pytest
+
+# These tests validate against OpenMM itself, so they need it present.
+# Skipped rather than collected as errors where it is absent, which keeps
+# the pure-JAX tests runnable in a plain environment.
+pytest.importorskip("openmm")
+
 import copy
 
 import numpy as np

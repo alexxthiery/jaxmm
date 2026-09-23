@@ -11,6 +11,7 @@ every jaxmm attribute it touches exists, so renaming or removing a public
 function fails here rather than in a reader's face.
 """
 
+
 import ast
 import os
 import pathlib
@@ -171,6 +172,7 @@ def test_example_runs_end_to_end():
     about 17 seconds. Static checks cannot catch a shape error or a bad
     argument, so one example is actually run.
     """
+    pytest.importorskip("openmm")
     directory = EXAMPLES_DIR / "aldp_potential_jaxmm"
     script = directory / f"{directory.name}.py"
     assert not any(call in script.read_text() for call in VIEWER_CALLS)

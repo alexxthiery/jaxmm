@@ -18,6 +18,7 @@ from jaxmm.extract import ForceFieldParams
 from jaxmm.energy import total_energy, _check_x64
 from jaxmm.coordinates import (
     ZMatrix,
+    zmatrix_in_domain,
     zmatrix_log_abs_det_jacobian,
     zmatrix_to_cartesian,
 )
@@ -107,8 +108,13 @@ def log_boltzmann_internal(
     about -84 nats, or 210 kJ/mol, which is enough to make any reweighting or
     free-energy estimate meaningless.
 
-    The density is singular where a bond length is zero or a reference triple
-    is collinear, and correctly returns -inf there.
+    Returns -inf off the chart the transform inverts, ``r > 0`` and
+    ``theta in (0, pi)`` (see ``zmatrix_in_domain``). That is the correct
+    value, not a guard: outside the chart the internal-to-Cartesian map is
+    exactly 2-to-1, so the change of variables does not hold and a density
+    formed from the Jacobian there would double count. Off-chart inputs are
+    also substituted before the energy is evaluated, so the gradient carries
+    no NaN into a caller that differentiates this function.
 
     Args:
         z_matrix: Z-matrix references for ``n_atoms`` atoms.
@@ -121,11 +127,20 @@ def log_boltzmann_internal(
     Returns:
         Scalar log unnormalized density (dimensionless).
     """
-    positions = zmatrix_to_cartesian(z_matrix, bonds, angles, torsions)
-    return (
+    bonds = jnp.asarray(bonds)
+    angles = jnp.asarray(angles)
+    on_chart = zmatrix_in_domain(bonds, angles)
+    # Substitute the inputs as well as masking the output. Masking only the
+    # output still differentiates the unmasked branch, and 0 * NaN is NaN, so
+    # one off-chart sample would poison the gradient of a whole batch.
+    safe_bonds = jnp.where(on_chart, bonds, 1.0)
+    safe_angles = jnp.where(on_chart, angles, 1.0)
+    positions = zmatrix_to_cartesian(z_matrix, safe_bonds, safe_angles, torsions)
+    value = (
         log_boltzmann(positions, params, temperature)
-        + zmatrix_log_abs_det_jacobian(z_matrix, bonds, angles)
+        + zmatrix_log_abs_det_jacobian(z_matrix, safe_bonds, safe_angles)
     )
+    return jnp.where(on_chart, value, -jnp.inf)
 
 
 def log_boltzmann_regularized(

@@ -1,5 +1,13 @@
 """Tests for periodic boundary conditions and nonbonded cutoff."""
 
+import pytest
+
+# These tests validate against OpenMM itself, so they need it present.
+# Skipped rather than collected as errors where it is absent, which keeps
+# the pure-JAX tests runnable in a plain environment.
+pytest.importorskip("openmm")
+
+
 import numpy as np
 import jax
 import jax.numpy as jnp

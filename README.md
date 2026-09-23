@@ -155,7 +155,7 @@ transforms themselves stay jit-traceable and do not re-check.
 atom `i >= 3`. Atom 1 contributes 1 because it is pinned to the x-axis.
 
 **The map is singular** where a bond length is zero or a reference triple is
-collinear, and `zmatrix_log_abs_det_jacobian` correctly diverges to `-inf` there.
+`zmatrix_log_abs_det_jacobian` is a function of the bond lengths and angles alone, so it is `-inf` exactly at a zero bond length or an angle of 0 or pi, and finite everywhere else, including off the chart. It says nothing about whether a reference triple is collinear: that makes the *construction* ill-posed while the determinant stays finite. Ask `zmatrix_in_domain` whether a configuration is on the chart; that is a different question.
 That is a property of internal coordinates, not a defect. Away from that
 measure-zero set every transform returns finite gradients, including at geometries
 that are exactly collinear.

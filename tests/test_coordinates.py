@@ -822,3 +822,239 @@ def test_validate_zmatrix_rejects_negative_references():
 def test_validate_zmatrix_accepts_the_shipped_aldp_matrix():
     """Positive control: the validator must not reject a z-matrix that is correct."""
     jaxmm.validate_zmatrix(jaxmm.aldp_zmatrix())
+
+
+# ---------------------------------------------------------------------------
+# Domain of the chart.
+#
+# The internal-to-Cartesian map is a valid chart only on r > 0 and
+# theta in (0, pi). Outside it the map is exactly 2-to-1, because
+# x(theta, phi) == x(-theta, phi + pi), so a density built from the Jacobian
+# there would double count. These tests pin the two halves of the contract
+# separately: the determinant is a determinant everywhere it is defined, and
+# the *density* is what vanishes off the chart.
+# ---------------------------------------------------------------------------
+
+def _valid_internals(seed=0):
+    """Internals of a non-degenerate structure, as float64 numpy."""
+    z = jaxmm.aldp_zmatrix()
+    x = jax.random.normal(jax.random.PRNGKey(seed), (z.n_atoms, 3), jnp.float64) * 0.15
+    b, a, t = jaxmm.cartesian_to_zmatrix(z, x)
+    return z, b, a, t
+
+
+def _ldj_oracle(bonds, angles):
+    """log|det J| written out as a float64 loop: log|r_1| + sum 2log|r_i| + log|sin th_i|."""
+    b = np.asarray(bonds, np.float64)
+    a = np.asarray(angles, np.float64)
+    total = np.log(np.abs(b[1]))
+    for i in range(2, len(b)):
+        total += 2.0 * np.log(np.abs(b[i]))
+    for i in range(1, len(a)):
+        total += np.log(np.abs(np.sin(a[i])))
+    return total
+
+
+class TestChartDomain:
+
+    def test_the_jacobian_never_returns_nan_off_the_chart(self):
+        """
+        Claim: the determinant is |r|^2 |sin theta|, so it is finite for a
+        negative bond length or an angle outside (0, pi).
+        Bug it catches: the defect this test was written for. `log(sin theta)`
+        and `log(r)` without absolute values return NaN there, and NaN is far
+        worse than a wrong number downstream: in LTR it either aborts a run or,
+        through `NaN >= log_tau` evaluating False and a cumulative AND, silently
+        closes a source's entire reach row.
+        Oracle: the absolute-value product formula as a float64 loop.
+        """
+        z, b, a, _ = _valid_internals()
+
+        for name, bb, aa in (("angle > pi", b, a.at[5].set(jnp.pi + 0.01)),
+                             ("angle < 0", b, a.at[5].set(-0.01)),
+                             ("bond < 0", b.at[5].set(-0.11), a)):
+            value = float(jaxmm.zmatrix_log_abs_det_jacobian(z, bb, aa))
+
+            assert np.isfinite(value), f"{name} gave {value}"
+            np.testing.assert_allclose(value, _ldj_oracle(bb, aa), rtol=1e-12)
+
+    def test_the_jacobian_is_unchanged_on_the_chart(self):
+        """
+        Regression: taking absolute values must not move any value that was
+        already correct, since every saved number depends on this.
+        Oracle: the same float64 loop, on a physical structure.
+        """
+        z, b, a, _ = _valid_internals()
+
+        np.testing.assert_allclose(
+            float(jaxmm.zmatrix_log_abs_det_jacobian(z, b, a)), _ldj_oracle(b, a), rtol=1e-12)
+
+    def test_the_determinant_vanishes_only_where_it_should(self):
+        """
+        Claim: log|det J| is -inf exactly at a zero bond length or a collinear
+        angle, which are the genuine zeros of the determinant.
+        Bug it catches: clamping the singularity to a finite floor, which jaxmm
+        documents as forbidden because it would make a singular configuration
+        look merely unlikely.
+        Oracle: the definition at the two zeros.
+        """
+        z, b, a, _ = _valid_internals()
+
+        assert float(jaxmm.zmatrix_log_abs_det_jacobian(z, b.at[5].set(0.0), a)) == -np.inf
+        assert float(jaxmm.zmatrix_log_abs_det_jacobian(z, b, a.at[5].set(0.0))) == -np.inf
+
+    @pytest.mark.parametrize("name, bond, angle, expected", [
+        ("physical", None, None, True),
+        ("bond zero", 0.0, None, False),
+        ("bond negative", -0.11, None, False),
+        ("angle zero", None, 0.0, False),
+        ("angle pi", None, np.pi, False),
+        ("angle above pi", None, np.pi + 0.01, False),
+        ("angle negative", None, -0.01, False),
+    ])
+    def test_the_domain_predicate_is_the_open_chart(self, name, bond, angle, expected):
+        """
+        Claim: `zmatrix_in_domain` is exactly r > 0 and theta in (0, pi), open
+        at both ends.
+        Bug it catches: a closed interval, which would admit the collinear
+        configurations where the map is not invertible and the determinant is 0.
+        Oracle: a hand table over every boundary case.
+        """
+        z, b, a, _ = _valid_internals()
+        if bond is not None:
+            b = b.at[5].set(bond)
+        if angle is not None:
+            a = a.at[5].set(angle)
+
+        assert bool(jaxmm.zmatrix_in_domain(b, a)) is expected
+
+    def test_the_domain_predicate_is_per_sample_over_a_batch(self):
+        """
+        Claim: the predicate maps a batch of internals to a boolean per sample.
+        Bug it catches: reducing over the batch, which would reject a whole
+        refresh because one sample of thousands left the chart.
+        Oracle: a batch built with known good and bad rows.
+        """
+        z, b, a, _ = _valid_internals()
+        bonds = jnp.stack([b, b, b.at[5].set(-0.11)])
+        angles = jnp.stack([a, a.at[5].set(jnp.pi + 0.01), a])
+
+        np.testing.assert_array_equal(
+            np.asarray(jaxmm.zmatrix_in_domain(bonds, angles)), [True, False, False])
+
+
+# ---------------------------------------------------------------------------
+# The density off the chart.
+#
+# `log_boltzmann_internal` is the function a flow trains against, so the chart
+# restriction has to bite here: off the chart the density is zero, i.e. -inf.
+# Built on a synthetic four-atom force field rather than an OpenMM system, so
+# the contract is checked by arithmetic and runs in any environment.
+# ---------------------------------------------------------------------------
+
+def _tiny_params():
+    """A four-atom force field, every term present and none of them zero."""
+    from jaxmm.extract import (AngleParams, BondParams, ForceFieldParams,
+                               NonbondedParams, TorsionParams)
+    i32 = lambda v: jnp.asarray(v, jnp.int32)
+    f64 = lambda v: jnp.asarray(v, jnp.float64)
+    return ForceFieldParams(
+        bonds=BondParams(atom_i=i32([0, 1, 2]), atom_j=i32([1, 2, 3]),
+                         r0=f64([0.15, 0.15, 0.15]), k=f64([2.0e5, 2.0e5, 2.0e5])),
+        angles=AngleParams(atom_i=i32([0, 1]), atom_j=i32([1, 2]), atom_k=i32([2, 3]),
+                           theta0=f64([1.91, 1.91]), k=f64([400.0, 400.0])),
+        torsions=TorsionParams(atom_i=i32([0]), atom_j=i32([1]), atom_k=i32([2]),
+                               atom_l=i32([3]), periodicity=i32([3]),
+                               phase=f64([0.0]), k=f64([5.0])),
+        nonbonded=NonbondedParams(
+            charges=f64([0.1, -0.1, 0.1, -0.1]), sigmas=f64([0.3] * 4),
+            epsilons=f64([0.4] * 4), n_atoms=4,
+            exclusion_pairs=i32([[0, 1], [1, 2], [2, 3], [0, 2], [1, 3]]),
+            exception_pairs=i32([[0, 3]]), exception_chargeprod=f64([-0.005]),
+            exception_sigma=f64([0.3]), exception_epsilon=f64([0.2]),
+            cutoff=None, switch_distance=None),
+        masses=f64([12.0, 12.0, 12.0, 12.0]), n_atoms=4)
+
+
+def _tiny_zmatrix():
+    from jaxmm.coordinates import ZMatrix
+    return ZMatrix(bond_ref=jnp.asarray([-1, 0, 1, 2], jnp.int32),
+                   angle_ref=jnp.asarray([-1, -1, 0, 1], jnp.int32),
+                   torsion_ref=jnp.asarray([-1, -1, -1, 0], jnp.int32))
+
+
+class TestInternalDensityOffChart:
+
+    B = jnp.asarray([0.15, 0.15, 0.15], jnp.float64)
+    A = jnp.asarray([1.91, 1.91], jnp.float64)
+    T = jnp.asarray([1.0], jnp.float64)
+
+    def test_the_density_is_minus_inf_off_the_chart(self):
+        """
+        Claim: an angle outside (0, pi) or a non-positive bond length gives
+        -inf, a legitimate zero, not NaN.
+        Bug it catches: the defect this was written for. The Jacobian returned
+        NaN there, and an importance-weighted trainer treats NaN as neither
+        pass nor fail: it either aborts the run or silently drops the level.
+        Oracle: the two boundary violations, one each.
+        """
+        z, ff = _tiny_zmatrix(), _tiny_params()
+
+        for bad_b, bad_a in ((self.B, self.A.at[1].set(jnp.pi + 0.01)),
+                             (self.B.at[1].set(-0.15), self.A)):
+            value = float(jaxmm.log_boltzmann_internal(z, bad_b, bad_a, self.T, ff, 300.0))
+
+            assert value == -np.inf, f"got {value}"
+
+    def test_the_density_is_unchanged_on_the_chart(self):
+        """
+        Regression: masking must not move a value that was already right.
+        Oracle: the Cartesian density plus the log Jacobian, formed separately.
+        """
+        z, ff = _tiny_zmatrix(), _tiny_params()
+        x = jaxmm.zmatrix_to_cartesian(z, self.B, self.A, self.T)
+        expected = (float(jaxmm.log_boltzmann(x, ff, 300.0))
+                    + float(jaxmm.zmatrix_log_abs_det_jacobian(z, self.B, self.A)))
+
+        got = float(jaxmm.log_boltzmann_internal(z, self.B, self.A, self.T, ff, 300.0))
+
+        np.testing.assert_allclose(got, expected, rtol=1e-12)
+
+    def test_the_gradient_off_the_chart_is_finite(self):
+        """
+        Claim: the gradient at an off-chart point carries no NaN.
+        Bug it catches: masking only the output. `jnp.where` applied to the
+        result still differentiates the unmasked branch, so `0 * NaN = NaN`
+        reaches the caller. Only masking the *inputs* as well avoids it. This
+        matters because gradient-based samplers and trainers differentiate this
+        function, and one NaN poisons an entire parameter update.
+        Oracle: every gradient entry finite, at a point that is off the chart.
+        """
+        z, ff = _tiny_zmatrix(), _tiny_params()
+        bad_a = self.A.at[1].set(jnp.pi + 0.01)
+
+        grads = jax.grad(lambda b, a, t: jaxmm.log_boltzmann_internal(z, b, a, t, ff, 300.0),
+                         argnums=(0, 1, 2))(self.B, bad_a, self.T)
+
+        for g in grads:
+            assert np.all(np.isfinite(np.asarray(g))), f"non-finite gradient: {g}"
+
+    def test_it_vmaps_over_a_batch_with_mixed_validity(self):
+        """
+        Claim: a batch containing off-chart rows returns -inf for those rows
+        and correct values for the rest.
+        Bug it catches: a Python-level branch on the predicate, which cannot
+        trace and would force the caller out of jit or, worse, reject the whole
+        batch.
+        Oracle: the per-row results against the same rows evaluated singly.
+        """
+        z, ff = _tiny_zmatrix(), _tiny_params()
+        bonds = jnp.stack([self.B, self.B, self.B.at[0].set(-0.15)])
+        angles = jnp.stack([self.A, self.A.at[0].set(-0.01), self.A])
+        torsions = jnp.stack([self.T, self.T, self.T])
+
+        out = jax.vmap(lambda b, a, t: jaxmm.log_boltzmann_internal(z, b, a, t, ff, 300.0))(
+            bonds, angles, torsions)
+
+        assert np.isfinite(float(out[0]))
+        assert float(out[1]) == -np.inf and float(out[2]) == -np.inf

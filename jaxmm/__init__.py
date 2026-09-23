@@ -34,6 +34,7 @@ from jaxmm.coordinates import (
     canonicalize_cartesian,
     cartesian_to_zmatrix,
     validate_zmatrix,
+    zmatrix_in_domain,
     zmatrix_log_abs_det_jacobian,
     zmatrix_to_cartesian,
 )
@@ -77,6 +78,7 @@ __all__ = [
     "canonicalize_cartesian",
     "cartesian_to_zmatrix",
     "validate_zmatrix",
+    "zmatrix_in_domain",
     "zmatrix_log_abs_det_jacobian",
     "zmatrix_to_cartesian",
     "KB",

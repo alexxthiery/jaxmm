@@ -16,16 +16,32 @@ import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 
-import openmm
-from openmm import unit
-from openmmtools import testsystems
+# OpenMM backs the fixtures that need a real force field or real positions. It
+# is not needed by the pure-geometry tests (coordinates, splines, validation),
+# so an environment without it collects and runs those instead of erroring out
+# at import. Fixtures that do need it skip, via the two testsystem roots below.
+try:
+    import openmm
+    from openmm import unit
+    from openmmtools import testsystems
+    HAVE_OPENMM = True
+except ImportError:                       # pragma: no cover - depends on the environment
+    openmm = unit = testsystems = None
+    HAVE_OPENMM = False
 
 from jaxmm.extract import extract_params
+
+
+def _require_openmm():
+    """Skip a test whose fixture cannot be built without OpenMM."""
+    if not HAVE_OPENMM:
+        pytest.skip("OpenMM is not installed in this environment")
 
 
 @pytest.fixture(scope="session")
 def aldp_testsystem():
     """Create alanine dipeptide vacuum test system (cached for session)."""
+    _require_openmm()
     return testsystems.AlanineDipeptideVacuum(constraints=None)
 
 
@@ -111,6 +127,7 @@ def aldp_params(aldp_system):
 @pytest.fixture(scope="session")
 def aldp_implicit_testsystem():
     """Create alanine dipeptide implicit solvent test system (cached for session)."""
+    _require_openmm()
     return testsystems.AlanineDipeptideImplicit(constraints=None)
 
 
@@ -188,6 +205,7 @@ def aldp_implicit_params(aldp_implicit_system):
 @pytest.fixture(scope="session")
 def toluene_testsystem():
     """Create toluene vacuum test system (cached for session)."""
+    _require_openmm()
     return testsystems.TolueneVacuum(constraints=None)
 
 

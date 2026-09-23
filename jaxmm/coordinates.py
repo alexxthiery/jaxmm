@@ -14,7 +14,11 @@ otherwise the angle or torsion it names is undefined.
 
 The map is singular where a bond length is zero or a reference triple is
 collinear.  That is a property of internal coordinates, not a defect:
-``zmatrix_log_abs_det_jacobian`` correctly diverges to ``-inf`` there.  Away
+``zmatrix_log_abs_det_jacobian`` is a function of the bond lengths and
+angles alone, so it diverges to ``-inf`` exactly at a zero bond length or an
+angle of 0 or pi.  A collinear reference triple leaves it finite while making
+the construction ill-posed, and ``zmatrix_in_domain`` is what answers whether a
+configuration lies on the chart the transform inverts.  Away
 from that measure-zero set all transforms return finite gradients.
 """
 
@@ -351,9 +355,14 @@ def zmatrix_log_abs_det_jacobian(
 ) -> jax.Array:
     """Compute the fixed-frame IC-to-Cartesian log absolute Jacobian.
 
-    The fixed-frame volume element is ``r_2`` for atom 2 and
-    ``r_i^2 sin(theta_i)`` for every atom ``i >= 3``.  Atom 1 contributes
+    The fixed-frame volume element is ``|r_2|`` for atom 2 and
+    ``r_i^2 |sin(theta_i)|`` for every atom ``i >= 3``.  Atom 1 contributes
     unit Jacobian because it lies on the x-axis.
+
+    Returns ``-inf`` exactly at the zeros of the determinant, a zero bond
+    length or a collinear angle, and a finite value everywhere else including
+    off the chart. Use ``zmatrix_in_domain`` to ask whether a configuration is
+    on the chart at all; that is a different question from the determinant.
 
     Args:
         z_matrix: Z-matrix references for ``n_atoms`` atoms.
@@ -369,9 +378,45 @@ def zmatrix_log_abs_det_jacobian(
     angles = jnp.asarray(angles)
     _check_internal_shapes(
         z_matrix, "zmatrix_log_abs_det_jacobian", bonds=bonds, angles=angles)
-    atom2_term = jnp.log(bonds[1])
-    later_terms = jnp.sum(2.0 * jnp.log(bonds[2:]) + jnp.log(jnp.sin(angles[1:])))
+    # Absolute values, as the function's name says. Without them a negative
+    # bond length or an angle outside (0, pi) returns NaN rather than a number,
+    # and NaN is far worse than a wrong value downstream: a sampler that
+    # threshold-tests the result gets False from every comparison and discards
+    # the configuration silently. The determinant is defined wherever it is
+    # nonzero; whether the configuration is *on the chart* is a separate
+    # question, answered by `zmatrix_in_domain`.
+    atom2_term = jnp.log(jnp.abs(bonds[1]))
+    later_terms = jnp.sum(2.0 * jnp.log(jnp.abs(bonds[2:]))
+                          + jnp.log(jnp.abs(jnp.sin(angles[1:]))))
     return atom2_term + later_terms
+
+
+def zmatrix_in_domain(bonds: jax.Array, angles: jax.Array) -> jax.Array:
+    """Whether internals lie on the chart the transform inverts.
+
+    The internal-to-Cartesian map is a bijection only on ``r > 0`` and
+    ``theta in (0, pi)``, both open. Outside it the map is exactly 2-to-1,
+    since ``x(theta, phi) == x(-theta, phi + pi)``, so a density built from
+    ``zmatrix_log_abs_det_jacobian`` there would double count and no amount of
+    care with the Jacobian would fix it. At the closed ends the map is not
+    invertible at all and the determinant is zero.
+
+    This is a predicate, not a validator: it returns an array rather than
+    raising, because the caller is typically a sampler that must mask a few
+    rows of a large batch inside ``jit`` rather than abort.
+
+    Args:
+        bonds: Bond lengths in nm, shape ``(..., n_atoms - 1)``.
+        angles: Bond angles in radians, shape ``(..., n_atoms - 2)``.
+
+    Returns:
+        Boolean of shape ``(...)``, one flag per sample.
+    """
+    bonds = jnp.asarray(bonds)
+    angles = jnp.asarray(angles)
+    return (jnp.all(bonds > 0.0, axis=-1)
+            & jnp.all(angles > 0.0, axis=-1)
+            & jnp.all(angles < jnp.pi, axis=-1))
 
 
 def aldp_zmatrix() -> ZMatrix:

@@ -171,7 +171,9 @@ These are the most common sources of bugs and confusion:
   same form as `energy.py:angle_energy`. This is the angle analogue of the
   `jnp.linalg.norm` rule and bit `cartesian_to_zmatrix` for exactly the same reason.
 - **Internal coordinates are genuinely singular** at zero bond length and at collinear
-  reference triples, where `zmatrix_log_abs_det_jacobian` goes to `-inf`. That is correct.
+  an angle of 0 or pi, where `zmatrix_log_abs_det_jacobian` goes to `-inf`. That is correct.
+  It is a function of the bonds and angles alone, so a collinear reference triple leaves it finite
+  while making the construction ill-posed. `zmatrix_in_domain` answers the chart question instead.
   Do not clamp it. Note `sin(pi)` is 1.2e-16 rather than 0 in float64, so the divergence
   shows up as a limit rather than an exact `-inf` at exactly pi.
 - **`lax.fori_loop` traces its body even when the trip count is zero**, so a triatomic
@@ -221,5 +223,12 @@ To orient in the codebase, read in this order:
 - No neighbor lists, no PME/Ewald, no long-range dispersion correction
 - No force field parameter assignment (OpenMM handles this)
 - No explicit solvent (implicit solvent via GBSA is supported)
+- `zmatrix_in_domain` is the chart predicate, `r > 0` and `theta in (0, pi)`, both open. Off that
+  chart the internal-to-Cartesian map is exactly 2-to-1, since `x(theta, phi) == x(-theta, phi + pi)`,
+  so a density built from the Jacobian there double counts. `log_boltzmann_internal` returns `-inf`
+  off the chart and substitutes its inputs first, so a caller that differentiates it gets no NaN.
+- The Jacobian takes absolute values. Without them an out-of-range angle returned NaN, which is worse
+  than a wrong number for a sampler: a threshold test against NaN is False, so the configuration is
+  discarded in silence rather than rejected loudly.
 - Internal coordinates are fixed-frame only: no free rigid-body degrees of freedom,
   so the map covers molecular shape, not absolute position or orientation
