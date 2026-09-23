@@ -230,5 +230,12 @@ To orient in the codebase, read in this order:
 - The Jacobian takes absolute values. Without them an out-of-range angle returned NaN, which is worse
   than a wrong number for a sampler: a threshold test against NaN is False, so the configuration is
   discarded in silence rather than rejected loudly.
+- Construction order is separate from atom order: `ZMatrix.atom_order[c]` is the atom placed at
+  step `c`, references are indexed by construction step so `ref[c] < c` holds, and only the two
+  boundaries permute. `None` means construction order is atom order. This is what lets the ALDP
+  frame be the backbone, and what an automatically built z-matrix needs.
+- The ALDP frame is C, CA, N of the alanine residue, so CA's substituents are pinned against a
+  frame triple and chirality is a single coordinate (`torsions[0]`), not a difference. `torsions[12]`
+  is phi and `torsions[5]` is psi. Rooting anywhere that moves with phi loses all three properties.
 - Internal coordinates are fixed-frame only: no free rigid-body degrees of freedom,
   so the map covers molecular shape, not absolute position or orientation

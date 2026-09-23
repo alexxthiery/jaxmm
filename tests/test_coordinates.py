@@ -1058,3 +1058,307 @@ class TestInternalDensityOffChart:
 
         assert np.isfinite(float(out[0]))
         assert float(out[1]) == -np.inf and float(out[2]) == -np.inf
+
+
+# ---------------------------------------------------------------------------
+# Construction order separate from atom order.
+#
+# Without `atom_order` the z-matrix forces construction order == atom index,
+# so the frame must be atoms 0, 1, 2 and every reference must point backwards
+# in atom numbering. For a real molecule that is the wrong constraint: the
+# rigid backbone is rarely numbered first, and an automatically built z-matrix
+# (bgmol's ZMatrixFactory, FAB's hand-written one) is not in atom order at all.
+#
+# `atom_order[c] = a` means construction step c places atom a. The references
+# stay in construction space, so the `ref[c] < c` invariant is untouched and
+# only the two boundaries permute.
+# ---------------------------------------------------------------------------
+
+CHAIN_REFS = dict(bond_ref=jnp.asarray([-1, 0, 1, 2], jnp.int32),
+                  angle_ref=jnp.asarray([-1, -1, 0, 1], jnp.int32),
+                  torsion_ref=jnp.asarray([-1, -1, -1, 0], jnp.int32))
+
+
+def _distance_matrix_np(x):
+    x = np.asarray(x, np.float64)
+    return np.linalg.norm(x[:, None, :] - x[None, :, :], axis=-1)
+
+
+class TestAtomOrder:
+
+    def test_no_atom_order_is_the_identity(self):
+        """
+        Claim: omitting `atom_order` leaves every existing result unchanged.
+        Bug it catches: a permutation applied unconditionally, which would
+        silently scramble every z-matrix already in use, including the shipped
+        one and every saved result derived from it.
+        Oracle: the same call with an explicit identity permutation.
+        """
+        from jaxmm.coordinates import ZMatrix
+        # Built from one set of references two ways, since aldp_zmatrix now
+        # carries a real permutation and would not test this.
+        unset = ZMatrix(**CHAIN_REFS)
+        identity = ZMatrix(**CHAIN_REFS,
+                           atom_order=jnp.arange(unset.n_atoms, dtype=jnp.int32))
+        z = unset
+        x = jax.random.normal(jax.random.PRNGKey(4), (unset.n_atoms, 3), jnp.float64) * 0.15
+
+        a = jaxmm.cartesian_to_zmatrix(z, x)
+        b = jaxmm.cartesian_to_zmatrix(identity, x)
+
+        for u, v in zip(a, b):
+            np.testing.assert_array_equal(np.asarray(u), np.asarray(v))
+
+    def test_a_permuted_order_describes_the_same_molecule(self):
+        """
+        Claim: a z-matrix that builds the same molecule in a different order
+        reproduces the same geometry, since a distance matrix does not care
+        which atom was placed first.
+        Bug it catches: permuting on one boundary and not the other, which
+        round trips consistently while describing a different molecule.
+        Oracle: the distance matrix of the input, which is frame independent.
+        """
+        from jaxmm.coordinates import ZMatrix
+        reversed_order = ZMatrix(**CHAIN_REFS,
+                                 atom_order=jnp.asarray([3, 2, 1, 0], jnp.int32))
+        x = jnp.asarray([[0.0, 0.0, 0.0], [0.15, 0.0, 0.0],
+                         [0.20, 0.14, 0.0], [0.34, 0.16, 0.05]], jnp.float64)
+
+        b, a, t = jaxmm.cartesian_to_zmatrix(reversed_order, x)
+        rebuilt = jaxmm.zmatrix_to_cartesian(reversed_order, b, a, t)
+
+        np.testing.assert_allclose(_distance_matrix_np(rebuilt), _distance_matrix_np(x),
+                                   atol=1e-12)
+
+    def test_the_round_trip_returns_atoms_in_their_own_order(self):
+        """
+        Claim: `zmatrix_to_cartesian` returns row i for atom i, whatever the
+        construction order, so the caller never sees construction indices.
+        Bug it catches: returning positions in construction order, which would
+        silently mismatch every force-field index, since those are in atom
+        order. The energy would be computed for a scrambled molecule and look
+        entirely plausible.
+        Oracle: the canonicalized input, atom by atom.
+        """
+        from jaxmm.coordinates import ZMatrix
+        reversed_order = ZMatrix(**CHAIN_REFS,
+                                 atom_order=jnp.asarray([3, 2, 1, 0], jnp.int32))
+        x = jnp.asarray([[0.0, 0.0, 0.0], [0.15, 0.0, 0.0],
+                         [0.20, 0.14, 0.0], [0.34, 0.16, 0.05]], jnp.float64)
+
+        b, a, t = jaxmm.cartesian_to_zmatrix(reversed_order, x)
+        rebuilt = jaxmm.zmatrix_to_cartesian(reversed_order, b, a, t)
+        canonical = jaxmm.canonicalize_cartesian(reversed_order, x)
+
+        np.testing.assert_allclose(np.asarray(rebuilt), np.asarray(canonical), atol=1e-12)
+
+    def test_the_jacobian_ignores_the_construction_order(self):
+        """
+        Claim: log|det J| is a product over bonds and angles, so relabelling
+        which atom each step places cannot change it.
+        Bug it catches: permuting the internals inside the Jacobian, which
+        would make the density depend on a bookkeeping choice.
+        Oracle: the same internals under two orders.
+        """
+        from jaxmm.coordinates import ZMatrix
+        plain = ZMatrix(**CHAIN_REFS)
+        permuted = ZMatrix(**CHAIN_REFS, atom_order=jnp.asarray([3, 2, 1, 0], jnp.int32))
+        b = jnp.asarray([0.15, 0.15, 0.15], jnp.float64)
+        a = jnp.asarray([1.91, 1.91], jnp.float64)
+
+        assert (float(jaxmm.zmatrix_log_abs_det_jacobian(plain, b, a))
+                == float(jaxmm.zmatrix_log_abs_det_jacobian(permuted, b, a)))
+
+    @pytest.mark.parametrize("bad, match", [
+        ([0, 1, 2], "length"),
+        ([0, 1, 2, 2], "permutation"),
+        ([0, 1, 2, 4], "permutation"),
+        ([-1, 1, 2, 3], "permutation"),
+    ])
+    def test_a_bad_atom_order_is_refused(self, bad, match):
+        """
+        Claim: `validate_zmatrix` rejects an `atom_order` that is not a
+        permutation of every atom exactly once.
+        Bug it catches: a duplicated or missing entry, which makes the scatter
+        drop atoms and leave others at the origin, a wrong answer that looks
+        like a plausible structure.
+        Oracle: a hand table of the ways a permutation can fail.
+        """
+        from jaxmm.coordinates import ZMatrix
+        z = ZMatrix(**CHAIN_REFS, atom_order=jnp.asarray(bad, jnp.int32))
+
+        with pytest.raises(ValueError, match=match):
+            jaxmm.validate_zmatrix(z)
+
+    def test_a_valid_atom_order_is_accepted(self):
+        """Fixture strength: the validator is not simply rejecting everything."""
+        from jaxmm.coordinates import ZMatrix
+        jaxmm.validate_zmatrix(ZMatrix(**CHAIN_REFS,
+                                       atom_order=jnp.asarray([3, 2, 1, 0], jnp.int32)))
+
+
+# ---------------------------------------------------------------------------
+# The rebuilt ALDP z-matrix.
+#
+# The first one was rooted in the acetyl methyl, which forced every reference
+# backwards in atom numbering. Three substituents of CA then shared one
+# reference triple whose third atom was not in the frame, so HA, CB and C all
+# swept together with phi. That made chirality a *difference* of coordinates
+# rather than a coordinate, so no domain restriction on a single torsion could
+# select an enantiomer: restricting one would cut the Ramachandran circle and
+# delete the alpha-L basin.
+#
+# With construction order free of atom order the frame is the rigid backbone
+# C, CA, N. CA's substituents are then pinned against a frame triple, so
+# chirality is a coordinate, and phi and psi are still sampled directly.
+#
+# Structure below is the standard extended conformation, in nm, embedded so
+# these tests need neither OpenMM nor a data file.
+# ---------------------------------------------------------------------------
+
+ALDP_XYZ = np.array([
+    [0.20000, 0.10000, -0.00000], [0.20000, 0.20900, 0.00000],
+    [0.14860, 0.24540, 0.08900], [0.14860, 0.24540, -0.08900],
+    [0.34270, 0.26410, -0.00000], [0.43910, 0.18770, -0.00000],
+    [0.35550, 0.39700, -0.00000], [0.27330, 0.45560, -0.00000],
+    [0.48530, 0.46140, -0.00000], [0.54080, 0.43160, 0.08900],
+    [0.56610, 0.42210, -0.12320], [0.51230, 0.45210, -0.21310],
+    [0.66300, 0.47190, -0.12060], [0.58090, 0.31410, -0.12410],
+    [0.47130, 0.61290, 0.00000], [0.36010, 0.66530, 0.00000],
+    [0.58460, 0.68350, 0.00000], [0.67370, 0.63590, -0.00000],
+    [0.58460, 0.82840, 0.00000], [0.48190, 0.86480, 0.00000],
+    [0.63600, 0.86480, 0.08900], [0.63600, 0.86480, -0.08900],
+], dtype=np.float64)
+
+CA, N_ALA, C_ALA, C_ACE, N_NME = 8, 6, 14, 4, 16
+PHI_TORSION, PSI_TORSION, CHIRALITY_TORSION = 12, 5, 0
+
+
+class TestALDPZMatrix:
+
+    def test_the_frame_is_the_backbone(self):
+        """
+        Claim: the first three construction steps place C, CA and N of the
+        alanine residue.
+        Bug it catches: the defect this rebuild exists for, a frame inside a
+        freely rotating terminal methyl, which forces CA's substituents to
+        share a reference triple that moves with phi.
+        Oracle: the atom indices, written out.
+        """
+        z = jaxmm.aldp_zmatrix()
+
+        np.testing.assert_array_equal(np.asarray(z.construction_order)[:3],
+                                      [C_ALA, CA, N_ALA])
+
+    def test_it_validates(self):
+        """The rebuilt z-matrix satisfies every structural rule, including the permutation."""
+        jaxmm.validate_zmatrix(jaxmm.aldp_zmatrix())
+
+    def test_the_round_trip_is_exact(self):
+        """
+        Claim: internals derived from a real structure rebuild it exactly, in
+        atom order.
+        Bug it catches: a permutation applied on one boundary only, or refs
+        that do not match the construction order.
+        Oracle: the canonicalized input, which is the frame-fixed form of the
+        same molecule.
+        """
+        z = jaxmm.aldp_zmatrix()
+        x = jnp.asarray(ALDP_XYZ)
+
+        b, a, t = jaxmm.cartesian_to_zmatrix(z, x)
+        rebuilt = jaxmm.zmatrix_to_cartesian(z, b, a, t)
+
+        np.testing.assert_allclose(np.asarray(rebuilt),
+                                   np.asarray(jaxmm.canonicalize_cartesian(z, x)), atol=1e-12)
+        np.testing.assert_allclose(_distance_matrix_np(rebuilt),
+                                   _distance_matrix_np(x), atol=1e-9)
+
+    def test_phi_and_psi_are_sampled_directly(self):
+        """
+        Claim: torsion PHI_TORSION is the IUPAC phi and PSI_TORSION is psi, so
+        the slow collective variables are coordinates rather than nonlinear
+        functions of coordinates.
+        Bug it catches: a construction order in which a backbone rotor is
+        placed after its siblings, which leaves phi recoverable only as a sum.
+        Oracle: `dihedral_angle` on the same structure, which is an independent
+        implementation of the dihedral.
+        """
+        z = jaxmm.aldp_zmatrix()
+        _, _, t = jaxmm.cartesian_to_zmatrix(z, jnp.asarray(ALDP_XYZ))
+        quads = jnp.asarray([[C_ACE, N_ALA, CA, C_ALA], [N_ALA, CA, C_ALA, N_NME]], jnp.int32)
+        phi, psi = np.asarray(jaxmm.dihedral_angle(jnp.asarray(ALDP_XYZ), quads))
+
+        # dihedral_angle negates to the biochemistry convention; z-matrix
+        # torsions follow OpenMM's. Compare as a wrapped magnitude.
+        wrap = lambda v: np.degrees((np.asarray(v) + np.pi) % (2 * np.pi) - np.pi)
+        assert abs(abs(wrap(t[PHI_TORSION])) - abs(wrap(phi))) < 1e-6
+        assert abs(abs(wrap(t[PSI_TORSION])) - abs(wrap(psi))) < 1e-6
+
+    def test_chirality_is_a_single_coordinate_that_flips_under_reflection(self):
+        """
+        Claim: torsion CHIRALITY_TORSION carries the sign of the alpha carbon's
+        handedness on its own, so restricting it to half a circle is an exact
+        fundamental domain that selects one enantiomer.
+        Bug it catches: the whole reason for the rebuild. If this torsion is a
+        rotor instead of a stiff improper, a half-circle restriction cuts the
+        Ramachandran circle rather than the enantiomer.
+        Oracle: the value on an L structure and on its mirror image.
+        """
+        z = jaxmm.aldp_zmatrix()
+        x = jnp.asarray(ALDP_XYZ)
+
+        _, _, t = jaxmm.cartesian_to_zmatrix(z, x)
+        _, _, t_mirror = jaxmm.cartesian_to_zmatrix(z, x * jnp.array([1.0, 1.0, -1.0]))
+
+        value = float(np.degrees(t[CHIRALITY_TORSION]))
+        mirrored = float(np.degrees(t_mirror[CHIRALITY_TORSION]))
+        assert 100.0 < abs(value) < 140.0, f"expected a stiff improper near 120, got {value}"
+        assert np.isclose(value, -mirrored, atol=1e-6), f"{value} did not flip to {-mirrored}"
+
+    def test_every_reference_triple_is_well_conditioned(self):
+        """
+        Claim: no reference triple is near collinear, so the construction never
+        approaches the degenerate case where the placement normal vanishes.
+        Bug it catches: a construction order that defines an atom through a
+        near-linear triple, which is a silently wrong geometry rather than a
+        failure.
+        Oracle: the angle at each reference triple, from the structure.
+        """
+        z = jaxmm.aldp_zmatrix()
+        order = np.asarray(z.construction_order)
+        br, ar, tr = (np.asarray(v) for v in (z.bond_ref, z.angle_ref, z.torsion_ref))
+
+        worst = 180.0
+        for c in range(3, len(order)):
+            p = ALDP_XYZ[order[[tr[c], ar[c], br[c]]]]
+            u, v = p[0] - p[1], p[2] - p[1]
+            cos = np.dot(u, v) / (np.linalg.norm(u) * np.linalg.norm(v))
+            angle = np.degrees(np.arccos(np.clip(cos, -1, 1)))
+            worst = min(worst, min(angle, 180.0 - angle))
+
+        assert worst > 15.0, f"a reference triple is only {worst:.1f} degrees from collinear"
+
+    def test_each_methyl_has_one_rotor_and_two_pinned_torsions(self):
+        """
+        Claim: within a methyl, one hydrogen is referenced to the backbone and
+        the other two to that hydrogen, so they are pinned near +/-120 rather
+        than sweeping together.
+        Bug it catches: all three referenced to the backbone, which is what the
+        first z-matrix did. Three coordinates then move as one, which is a
+        near-deterministic dependence between coordinates and the classic way
+        to destroy an importance-sampling ESS.
+        Oracle: the pinned torsions' values on the real structure.
+        """
+        z = jaxmm.aldp_zmatrix()
+        _, _, t = jaxmm.cartesian_to_zmatrix(z, jnp.asarray(ALDP_XYZ))
+        order = np.asarray(z.construction_order)
+        tr = np.asarray(z.torsion_ref)
+
+        pinned = [c for c in range(3, len(order))
+                  if order[c] in (12, 13, 20, 21)]       # the second and third methyl H of each
+        assert len(pinned) == 4
+        for c in pinned:
+            assert tr[c] >= 3, "a pinned hydrogen must reference its sibling, not the frame"
+            value = abs(float(np.degrees(t[c - 3])))
+            assert 100.0 < value < 140.0, f"step {c} torsion {value} is not a pinned +/-120"

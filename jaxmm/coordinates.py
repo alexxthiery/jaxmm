@@ -103,11 +103,33 @@ class ZMatrix:
             ``(n_atoms,)``.  Entries 0, 1, and 2 must be ``-1``.  For atom
             ``i > 2``, the torsion is formed by
             ``torsion_ref[i] - angle_ref[i] - bond_ref[i] - i``.
+        atom_order: Optional permutation, shape ``(n_atoms,)``.
+            ``atom_order[c]`` is the atom placed at construction step ``c``.
+            When ``None`` (the default) construction order is atom order and
+            nothing changes.
+
+    The three reference arrays are indexed by **construction step**, and their
+    values are construction steps too, so ``ref[c] < c`` always holds and the
+    frame is steps 0, 1, 2.  Only the two boundaries permute:
+    ``cartesian_to_zmatrix`` gathers positions into construction order on the
+    way in, and ``zmatrix_to_cartesian`` scatters back to atom order on the way
+    out, so a caller never handles a construction index.  This is what lets the
+    frame be the rigid backbone rather than whichever atoms happen to be
+    numbered first, and it is what an automatically built z-matrix needs, since
+    those are not produced in atom order.
     """
 
     bond_ref: jax.Array
     angle_ref: jax.Array
     torsion_ref: jax.Array
+    atom_order: jax.Array | None = None
+
+    @property
+    def construction_order(self) -> jax.Array:
+        """Which atom each construction step places, identity when unset."""
+        if self.atom_order is None:
+            return jnp.arange(self.n_atoms, dtype=jnp.int32)
+        return jnp.asarray(self.atom_order, dtype=jnp.int32)
 
     @property
     def n_atoms(self) -> int:
@@ -174,6 +196,15 @@ def validate_zmatrix(z_matrix: ZMatrix) -> None:
             "angle_ref[2] must be 0: the fixed frame measures atom 2's angle "
             f"against atom 0, got {angle_ref[2]}"
         )
+    if z_matrix.atom_order is not None:
+        order = np.asarray(z_matrix.atom_order)
+        if order.shape != (n_atoms,):
+            raise ValueError(
+                f"atom_order must have length {n_atoms}, got {order.shape}")
+        if not np.array_equal(np.sort(order), np.arange(n_atoms)):
+            raise ValueError(
+                "atom_order must be a permutation of every atom exactly once, "
+                f"got {order.tolist()}")
 
     # Repeated reference atoms leave the angle or torsion undefined.
     _reject_repeat(angle_ref, bond_ref, 2, "angle_ref", "bond_ref")
@@ -277,7 +308,12 @@ def zmatrix_to_cartesian(
     # indexes `torsions`, which is empty for a triatomic. Skip it outright.
     if n_atoms == 3:
         return positions
-    return jax.lax.fori_loop(3, n_atoms, place_atom, positions)
+    built = jax.lax.fori_loop(3, n_atoms, place_atom, positions)
+    # Built in construction order; hand back atom order, because every caller
+    # and every force-field index is in atom order.
+    if z_matrix.atom_order is None:
+        return built
+    return jnp.zeros_like(built).at[z_matrix.construction_order].set(built)
 
 
 def cartesian_to_zmatrix(z_matrix: ZMatrix, positions: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array]:
@@ -295,6 +331,10 @@ def cartesian_to_zmatrix(z_matrix: ZMatrix, positions: jax.Array) -> tuple[jax.A
     _check_x64()
     positions = jnp.asarray(positions)
     _check_zmatrix_positions(z_matrix, positions, "cartesian_to_zmatrix")
+    # The references below are construction steps, so read the positions in
+    # construction order. The returned internals are indexed the same way.
+    if z_matrix.atom_order is not None:
+        positions = positions[z_matrix.construction_order]
     n_atoms = z_matrix.n_atoms
 
     def bond_for_atom(atom_index):
@@ -420,23 +460,52 @@ def zmatrix_in_domain(bonds: jax.Array, angles: jax.Array) -> jax.Array:
 
 
 def aldp_zmatrix() -> ZMatrix:
-    """Return an explicit ALDP z-matrix for openmmtools atom ordering.
+    """Return the ALDP z-matrix for openmmtools atom ordering.
+
+    Built outward from the rigid backbone: construction steps 0, 1, 2 place
+    C, CA and N of the alanine residue, and ``atom_order`` carries the
+    permutation, since those are atoms 14, 8 and 6.
+
+    Two properties follow from that choice and neither is free:
+
+    * **Chirality is a coordinate.** CA's substituents are measured against a
+      reference triple lying entirely in the frame, so each is a stiff improper
+      near +/-120 degrees whose sign flips under reflection.  Torsion 0 is one,
+      so restricting it to half a circle is an exact fundamental domain that
+      selects a single enantiomer.  Rooted anywhere that moves with phi, the
+      substituents sweep together and no single torsion carries the sign; a
+      half-circle restriction then cuts the Ramachandran circle instead, which
+      deletes the alpha-L basin.
+    * **phi and psi are sampled directly**, at torsions 12 and 5, so the slow
+      collective variables are coordinates rather than sums of coordinates.
+
+    Within each methyl one hydrogen is referenced to the backbone and the other
+    two to that hydrogen, so they are pinned near +/-120 rather than sweeping
+    together.  Three coordinates moving as one is a near-deterministic
+    dependence, and those are what destroy an importance-sampling ESS.
 
     Returns:
         ``ZMatrix`` for the 22-atom alanine dipeptide systems in
         ``openmmtools.testsystems``.
     """
 
+    # Construction step -> atom.  C, CA, N first, then out along each branch.
+    atom_order = jnp.array(
+        [14, 8, 6, 10, 9, 11, 12, 13, 16, 15, 18, 17, 19, 20, 21, 4, 7, 5, 1, 0, 2, 3],
+        dtype=jnp.int32,
+    )
+    # References are construction steps, so every entry is below its own index.
     bond_ref = jnp.array(
-        [-1, 0, 1, 1, 1, 4, 4, 6, 6, 8, 8, 10, 10, 10, 8, 14, 14, 16, 16, 18, 18, 18],
+        [-1, 0, 1, 1, 1, 3, 3, 3, 0, 0, 8, 8, 10, 10, 10, 2, 2, 15, 15, 18, 18, 18],
         dtype=jnp.int32,
     )
     angle_ref = jnp.array(
-        [-1, -1, 0, 0, 0, 1, 1, 4, 4, 6, 6, 8, 8, 8, 6, 8, 8, 14, 14, 16, 16, 16],
+        [-1, -1, 0, 2, 2, 1, 1, 1, 1, 1, 0, 0, 8, 8, 8, 1, 1, 2, 2, 15, 15, 15],
         dtype=jnp.int32,
     )
     torsion_ref = jnp.array(
-        [-1, -1, -1, 2, 2, 0, 0, 1, 1, 4, 4, 6, 6, 6, 4, 6, 6, 8, 8, 14, 14, 14],
+        [-1, -1, -1, 0, 0, 2, 5, 5, 2, 8, 1, 10, 0, 12, 12, 0, 15, 1, 17, 2, 19, 19],
         dtype=jnp.int32,
     )
-    return ZMatrix(bond_ref=bond_ref, angle_ref=angle_ref, torsion_ref=torsion_ref)
+    return ZMatrix(bond_ref=bond_ref, angle_ref=angle_ref, torsion_ref=torsion_ref,
+                   atom_order=atom_order)

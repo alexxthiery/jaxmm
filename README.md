@@ -84,7 +84,8 @@ All energy functions follow the same signature: `(positions, params) -> scalar`.
 | `canonicalize_cartesian(z, pos)` | Remove rigid translation and rotation |
 | `zmatrix_log_abs_det_jacobian(z, bonds, angles)` | `log \|det J\|` of the internal-to-Cartesian map |
 | `validate_zmatrix(z)` | Host-side check of z-matrix metadata (raises `ValueError`) |
-| `aldp_zmatrix()` | Z-matrix for the 22-atom openmmtools alanine dipeptide |
+| `zmatrix_in_domain(bonds, angles)` | Whether internals lie on the chart, `r > 0` and `theta` in `(0, pi)`, per sample |
+| `aldp_zmatrix()` | Z-matrix for the 22-atom openmmtools alanine dipeptide, rooted on the backbone |
 | `verlet(pos, vel, params, dt, n, ...)` | Velocity Verlet integrator (symplectic, energy-conserving) |
 | `langevin_baoab(pos, vel, params, dt, T, friction, n, *, key)` | Langevin BAOAB thermostat (second-order, ergodic) |
 | `kinetic_energy(vel, masses)` | `0.5 * sum(m * v^2)` in kJ/mol |
@@ -125,10 +126,34 @@ dipeptide is about `-84` nats, or 210 kJ/mol, or 84 kBT. Omitting it is silent
 and large enough to make any reweighting or free-energy estimate meaningless.
 
 **Backbone phi and psi are explicit z-matrix torsions.** For the shipped ALDP
-z-matrix, `torsions[11]` is phi and `torsions[13]` is psi, matching
+z-matrix, `torsions[12]` is phi and `torsions[5]` is psi, matching
 `phi_indices` and `psi_indices` exactly. This is what makes these coordinates
 suitable for a flow: the slow collective variables are sampled directly rather
 than being nonlinear functions of the sampled variables.
+
+**Construction order is separate from atom order.** `ZMatrix.atom_order[c]` is
+the atom placed at construction step `c`; the reference arrays are indexed by
+construction step, so `ref[c] < c` always holds and the frame is steps 0, 1, 2.
+Only the two boundaries permute, so a caller never handles a construction
+index: `cartesian_to_zmatrix` takes and `zmatrix_to_cartesian` returns
+positions in atom order. Leave `atom_order` as `None` and construction order is
+atom order, as before.
+
+This is what lets the ALDP frame be the rigid backbone, C, CA and N, rather
+than whichever atoms happen to be numbered first. It is also what an
+automatically built z-matrix needs, since those are not produced in atom order.
+
+**Chirality is a single coordinate.** Because CA's substituents are measured
+against a reference triple lying entirely in the frame, each is a stiff
+improper near `+/-120` degrees whose sign flips under reflection. `torsions[0]`
+is one of them, so restricting it to half a circle is an exact fundamental
+domain that selects one enantiomer, at no cost and with no rejection.
+
+Rooting the frame anywhere that moves with phi loses this: the substituents
+then sweep together, no single torsion carries the sign, and a half-circle
+restriction cuts the Ramachandran circle instead, deleting the alpha-L basin.
+The mirror map in these coordinates is exactly `t -> -t` on every torsion, with
+bonds and angles unchanged.
 
 **Z-matrix torsions carry the opposite sign to `dihedral_angle`.**
 `coordinates.py` follows OpenMM's `PeriodicTorsionForce`; `utils.dihedral_angle`
@@ -137,8 +162,8 @@ their own context and neither will change. A Ramachandran plot built from
 z-matrix torsions without negating is mirrored, and looks entirely plausible:
 
 ```python
-phi_zmat = -torsions[11]   # now matches jaxmm.dihedral_angle
-psi_zmat = -torsions[13]
+phi_zmat = -torsions[12]   # now matches jaxmm.dihedral_angle
+psi_zmat = -torsions[5]
 ```
 
 **The fixed frame.** Atom 0 sits at the origin, atom 1 on the positive x-axis, and
