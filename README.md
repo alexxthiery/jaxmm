@@ -187,7 +187,7 @@ tests/
   test_nonbonded.py  nonbonded energy vs OpenMM (5 tests)
   test_pbc.py        periodic boundary conditions + cutoff (11 tests)
   test_gbsa.py       GBSA energy, Born radii, gradients, jit, vmap (19 tests)
-  test_total.py      total energy, vmap, log_boltzmann, energy_components, composability (27 tests)
+  test_total.py      total energy, vmap, log_boltzmann, energy_components, composability (28 tests)
   test_dihedral.py   phi/psi dihedral angles (6 tests)
   test_grad.py       gradients vs OpenMM forces + finite diff (8 tests)
   test_integrate.py  Verlet + Langevin BAOAB integrators (17 tests)
