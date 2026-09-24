@@ -230,6 +230,12 @@ To orient in the codebase, read in this order:
 - The Jacobian takes absolute values. Without them an out-of-range angle returned NaN, which is worse
   than a wrong number for a sampler: a threshold test against NaN is False, so the configuration is
   discarded in silence rather than rejected loudly.
+- Whitening is a separate map from the z-matrix, with its own constant log-Jacobian, and the two
+  compose additively. For alanine dipeptide they are about `-85` and `-149` nats, so the whitening
+  term is the larger; it is a constant, which is why omitting it never shows up in training.
+- `whitened_chart_bounds` bounds a flow domain from the *chart*, never from data. Data bounds would
+  admit a negative bond length. On a 300 K trajectory the nearest bound is about 8 standard
+  deviations away, so the restriction costs nothing physical.
 - Construction order is separate from atom order: `ZMatrix.atom_order[c]` is the atom placed at
   step `c`, references are indexed by construction step so `ref[c] < c` holds, and only the two
   boundaries permute. `None` means construction order is atom order. This is what lets the ALDP

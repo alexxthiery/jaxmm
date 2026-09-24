@@ -509,3 +509,139 @@ def aldp_zmatrix() -> ZMatrix:
     )
     return ZMatrix(bond_ref=bond_ref, angle_ref=angle_ref, torsion_ref=torsion_ref,
                    atom_order=atom_order)
+
+
+# Per-type whitening scales, in nm and radians. Declared rather than fitted,
+# which is what both reference implementations do: FAB's `default_std` is
+# {'bond': 0.005, 'angle': 0.15, 'dih': 0.2}
+# (fab/target_distributions/aldp.py), and TA-BG and CMT use an effective 0.07
+# and 0.5730 in their own [0, 1]-normalized units. Torsions are left alone here:
+# they are already O(1) in radians and they are the coordinates that carry the
+# multimodality, so rescaling them buys nothing.
+BOND_SCALE = 0.005
+ANGLE_SCALE = 0.15
+
+
+@dataclass(frozen=True)
+class InternalWhitener:
+    """Affine whitening of bond lengths and bond angles.
+
+    Bond lengths vary by about 0.005 nm around 0.1, so a flow handed raw
+    internals spends its capacity on the scale difference rather than on the
+    torsions. The centre is a reference structure's own internals, so that
+    structure whitens to the origin, where a flow's base sits.
+
+    Args:
+        bond_center: Reference bond lengths in nm, shape ``(n_atoms - 1,)``.
+        bond_scale: Bond scales in nm, same shape, all positive.
+        angle_center: Reference bond angles in radians, shape ``(n_atoms - 2,)``.
+        angle_scale: Angle scales in radians, same shape, all positive.
+
+    Torsions are not whitened and do not appear here.
+    """
+
+    bond_center: jax.Array
+    bond_scale: jax.Array
+    angle_center: jax.Array
+    angle_scale: jax.Array
+
+
+_register_pytree(InternalWhitener)
+
+
+def internal_whitener(
+    z_matrix: ZMatrix,
+    positions: jax.Array,
+    bond_scale: float = BOND_SCALE,
+    angle_scale: float = ANGLE_SCALE,
+) -> InternalWhitener:
+    """Build a whitener centred on a reference structure.
+
+    Args:
+        z_matrix: Z-matrix references.
+        positions: The reference structure in nm, shape ``(n_atoms, 3)``.
+            Normally an energy-minimized one, as in FAB and TA-BG.
+        bond_scale: Bond scale in nm. See ``BOND_SCALE`` for the default's source.
+        angle_scale: Angle scale in radians.
+
+    Returns:
+        ``InternalWhitener`` whose centre is this structure's internals.
+
+    Raises:
+        ValueError: If either scale is not positive.
+    """
+
+    _check_x64()
+    for name, value in (("bond_scale", bond_scale), ("angle_scale", angle_scale)):
+        if not float(value) > 0.0:
+            raise ValueError(f"{name} must be positive, got {value}")
+    bonds, angles, _ = cartesian_to_zmatrix(z_matrix, positions)
+    # Scales are broadcast to arrays at construction, so every consumer below
+    # is a plain elementwise operation and the log-Jacobian is a plain sum.
+    return InternalWhitener(
+        bond_center=bonds, bond_scale=jnp.full_like(bonds, bond_scale),
+        angle_center=angles, angle_scale=jnp.full_like(angles, angle_scale),
+    )
+
+
+def whiten_internals(whitener: InternalWhitener, bonds: jax.Array,
+                     angles: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Map bonds and angles to whitened coordinates.
+
+    Args:
+        whitener: The whitener.
+        bonds: Bond lengths in nm, shape ``(..., n_atoms - 1)``.
+        angles: Bond angles in radians, shape ``(..., n_atoms - 2)``.
+
+    Returns:
+        ``(u_bonds, u_angles)``, the same shapes.
+    """
+
+    return ((bonds - whitener.bond_center) / whitener.bond_scale,
+            (angles - whitener.angle_center) / whitener.angle_scale)
+
+
+def unwhiten_internals(whitener: InternalWhitener, u_bonds: jax.Array,
+                       u_angles: jax.Array) -> tuple[jax.Array, jax.Array]:
+    """Map whitened coordinates back to bonds and angles. Inverse of ``whiten_internals``."""
+
+    return (u_bonds * whitener.bond_scale + whitener.bond_center,
+            u_angles * whitener.angle_scale + whitener.angle_center)
+
+
+def whitener_log_abs_det_jacobian(whitener: InternalWhitener) -> jax.Array:
+    """``log |det d(bonds, angles) / du|``, a constant.
+
+    This is the *unwhitening* direction, because that is what a density over
+    whitened coordinates needs: ``p(u) = p(eta(u)) |d eta / du|``. The map is
+    diagonal with the scales on the diagonal, so the determinant is their
+    product. It is a constant, which is precisely why it is easy to omit and
+    why omitting it is invisible during training and fatal to any free energy.
+
+    Returns:
+        Scalar.
+    """
+
+    _check_x64()
+    return (jnp.sum(jnp.log(whitener.bond_scale))
+            + jnp.sum(jnp.log(whitener.angle_scale)))
+
+
+def whitened_chart_bounds(whitener: InternalWhitener):
+    """The whitened image of the chart, per coordinate.
+
+    The transform inverts only on ``r > 0`` and ``theta in (0, pi)``
+    (``zmatrix_in_domain``), so a flow over whitened coordinates must be
+    bounded by the image of that set rather than by anything measured from
+    data. A bond length has no upper bound, so its upper edge is ``+inf``.
+
+    Returns:
+        ``((bond_low, bond_high), (angle_low, angle_high))``, each the shape of
+        its coordinate block.
+    """
+
+    bond_low = (0.0 - whitener.bond_center) / whitener.bond_scale
+    bond_high = jnp.full_like(bond_low, jnp.inf)
+    angle_low = (0.0 - whitener.angle_center) / whitener.angle_scale
+    angle_high = (jnp.pi - whitener.angle_center) / whitener.angle_scale
+    return (bond_low, bond_high), (angle_low, angle_high)

@@ -1362,3 +1362,145 @@ class TestALDPZMatrix:
             assert tr[c] >= 3, "a pinned hydrogen must reference its sibling, not the frame"
             value = abs(float(np.degrees(t[c - 3])))
             assert 100.0 < value < 140.0, f"step {c} torsion {value} is not a pinned +/-120"
+
+
+# ---------------------------------------------------------------------------
+# Whitening bonds and angles.
+#
+# Bond lengths have a spread of about 0.005 nm around 0.1, so a flow given raw
+# internals spends its capacity on the scale difference rather than on the
+# torsions, which carry all the multimodality. Both reference implementations
+# whiten against an energy-minimized structure with fixed per-type scales
+# rather than fitted ones, and so do we.
+#
+# The map is affine and the scales are constants, so its log-Jacobian is a
+# constant too. That is not a reason to skip it: it is about -84 nats for
+# alanine dipeptide on the z-matrix side alone, and a constant omitted from a
+# density is exactly the kind of error that cancels in training and ruins every
+# free energy.
+# ---------------------------------------------------------------------------
+
+class TestInternalWhitener:
+
+    def _built(self):
+        z = jaxmm.aldp_zmatrix()
+        return z, jaxmm.internal_whitener(z, jnp.asarray(ALDP_XYZ))
+
+    def test_the_reference_structure_sits_at_the_origin(self):
+        """
+        Claim: whitening the structure the whitener was built from gives zero.
+        Bug it catches: centring on the wrong quantity, for instance the mean
+        of a batch or the scale rather than the centre, which leaves the flow's
+        base offset from the data it must model.
+        Oracle: zero, exactly.
+        """
+        z, w = self._built()
+        bonds, angles, _ = jaxmm.cartesian_to_zmatrix(z, jnp.asarray(ALDP_XYZ))
+
+        u_bonds, u_angles = jaxmm.whiten_internals(w, bonds, angles)
+
+        np.testing.assert_allclose(np.asarray(u_bonds), 0.0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(u_angles), 0.0, atol=1e-12)
+
+    def test_the_round_trip_is_the_identity(self):
+        """
+        Claim: unwhiten undoes whiten to machine precision.
+        Bug it catches: a sign or a reciprocal in one direction only, which
+        looks plausible in either direction alone.
+        Oracle: the inputs.
+        """
+        z, w = self._built()
+        bonds, angles, _ = jaxmm.cartesian_to_zmatrix(z, jnp.asarray(ALDP_XYZ) * 1.02)
+
+        back = jaxmm.unwhiten_internals(w, *jaxmm.whiten_internals(w, bonds, angles))
+
+        np.testing.assert_allclose(np.asarray(back[0]), np.asarray(bonds), rtol=1e-14)
+        np.testing.assert_allclose(np.asarray(back[1]), np.asarray(angles), rtol=1e-14)
+
+    def test_the_log_jacobian_matches_an_automatic_one(self):
+        """
+        Claim: `whitener_log_abs_det_jacobian` is log|det d(bonds,angles)/du|.
+        Bug it catches: the reciprocal, which is the easy mistake because the
+        map is defined in the whitening direction while the density needs the
+        unwhitening one; and summing the wrong subset of scales.
+        Oracle: `jax.jacfwd` of the unwhiten map, in float64.
+        """
+        z, w = self._built()
+        n_b, n_a = z.n_atoms - 1, z.n_atoms - 2
+
+        def unwhiten_flat(u):
+            b, a = jaxmm.unwhiten_internals(w, u[:n_b], u[n_b:])
+            return jnp.concatenate([b, a])
+
+        jac = jax.jacfwd(unwhiten_flat)(jnp.zeros((n_b + n_a,), jnp.float64))
+        expected = float(jnp.linalg.slogdet(jac)[1])
+
+        np.testing.assert_allclose(float(jaxmm.whitener_log_abs_det_jacobian(w)),
+                                   expected, rtol=1e-12)
+
+    def test_the_jacobians_compose(self):
+        """
+        Claim, and the reason both exist: the log-Jacobian of whitened
+        internals to Cartesians is the z-matrix term plus the whitening term.
+        Bug it catches: applying the whitening scales twice, or not at all,
+        when the two are used together. That is a constant offset in the
+        density, invisible in training and fatal to any free energy.
+        Oracle: `0.5 log det(J^T J)` of the composed map by `jax.jacfwd`, since
+        the map is 60 to 66 and has no square determinant.
+        """
+        z, w = self._built()
+        n_b, n_a = z.n_atoms - 1, z.n_atoms - 2
+        bonds, angles, torsions = jaxmm.cartesian_to_zmatrix(z, jnp.asarray(ALDP_XYZ))
+        u_bonds, u_angles = jaxmm.whiten_internals(w, bonds, angles)
+        u = jnp.concatenate([u_bonds, u_angles, torsions])
+
+        def to_cartesian(v):
+            b, a = jaxmm.unwhiten_internals(w, v[:n_b], v[n_b:n_b + n_a])
+            return jaxmm.zmatrix_to_cartesian(z, b, a, v[n_b + n_a:]).reshape(-1)
+
+        jac = jax.jacfwd(to_cartesian)(u)
+        numerical = 0.5 * float(jnp.linalg.slogdet(jac.T @ jac)[1])
+        analytic = (float(jaxmm.zmatrix_log_abs_det_jacobian(z, bonds, angles))
+                    + float(jaxmm.whitener_log_abs_det_jacobian(w)))
+
+        np.testing.assert_allclose(analytic, numerical, rtol=1e-10)
+
+    def test_the_bounds_are_the_image_of_the_chart(self):
+        """
+        Claim: `whitened_chart_bounds` gives, per coordinate, the whitened
+        image of `r > 0` and `theta in (0, pi)`, which is what a bounded flow
+        domain needs.
+        Bug it catches: bounds computed from the data rather than the chart,
+        which would let a flow place mass on a negative bond length; or the
+        scales applied without the centre.
+        Oracle: unwhitening the bounds returns exactly 0 and pi.
+        """
+        z, w = self._built()
+
+        (b_lo, b_hi), (a_lo, a_hi) = jaxmm.whitened_chart_bounds(w)
+        bonds_lo, angles_lo = jaxmm.unwhiten_internals(w, b_lo, a_lo)
+        _, angles_hi = jaxmm.unwhiten_internals(w, b_hi, a_hi)
+
+        np.testing.assert_allclose(np.asarray(bonds_lo), 0.0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(angles_lo), 0.0, atol=1e-12)
+        np.testing.assert_allclose(np.asarray(angles_hi), np.pi, rtol=1e-12)
+        assert np.all(np.asarray(b_hi) == np.inf), "a bond length has no upper bound"
+
+    def test_the_reference_structure_is_strictly_inside_the_bounds(self):
+        """
+        Fixture strength: the origin, where the flow's base sits, must be
+        interior rather than on a boundary.
+        Oracle: the bounds against zero.
+        """
+        _, w = self._built()
+        (b_lo, b_hi), (a_lo, a_hi) = jaxmm.whitened_chart_bounds(w)
+
+        assert np.all(np.asarray(b_lo) < 0.0) and np.all(np.asarray(b_hi) > 0.0)
+        assert np.all(np.asarray(a_lo) < 0.0) and np.all(np.asarray(a_hi) > 0.0)
+
+    def test_a_non_positive_scale_is_refused(self):
+        """A zero or negative scale is a caller bug, not a degenerate whitener."""
+        z = jaxmm.aldp_zmatrix()
+        for bad in (0.0, -0.005):
+            with pytest.raises(ValueError, match="scale"):
+                jaxmm.internal_whitener(z, jnp.asarray(ALDP_XYZ), bond_scale=bad)

@@ -85,6 +85,11 @@ All energy functions follow the same signature: `(positions, params) -> scalar`.
 | `zmatrix_log_abs_det_jacobian(z, bonds, angles)` | `log \|det J\|` of the internal-to-Cartesian map |
 | `validate_zmatrix(z)` | Host-side check of z-matrix metadata (raises `ValueError`) |
 | `zmatrix_in_domain(bonds, angles)` | Whether internals lie on the chart, `r > 0` and `theta` in `(0, pi)`, per sample |
+| `internal_whitener(z, positions)` | Affine whitener for bonds and angles, centred on a reference structure |
+| `whiten_internals(w, bonds, angles)` | Bonds and angles to whitened coordinates |
+| `unwhiten_internals(w, u_bonds, u_angles)` | The inverse |
+| `whitener_log_abs_det_jacobian(w)` | `log \|det d(bonds, angles)/du\|`, a constant |
+| `whitened_chart_bounds(w)` | The whitened image of the chart, per coordinate |
 | `aldp_zmatrix()` | Z-matrix for the 22-atom openmmtools alanine dipeptide, rooted on the backbone |
 | `verlet(pos, vel, params, dt, n, ...)` | Velocity Verlet integrator (symplectic, energy-conserving) |
 | `langevin_baoab(pos, vel, params, dt, T, friction, n, *, key)` | Langevin BAOAB thermostat (second-order, ergodic) |
@@ -130,6 +135,29 @@ z-matrix, `torsions[12]` is phi and `torsions[5]` is psi, matching
 `phi_indices` and `psi_indices` exactly. This is what makes these coordinates
 suitable for a flow: the slow collective variables are sampled directly rather
 than being nonlinear functions of the sampled variables.
+
+**Whiten bonds and angles before handing them to a flow.** Measured on a
+300 K trajectory of alanine dipeptide, raw bond standard deviations run 0.0016
+to 0.0036 nm while angles run 0.049 to 0.088 rad, two orders of magnitude
+apart. After whitening both blocks sit at 0.32 to 0.72, so a flow spends its
+capacity on the torsions, which carry the multimodality, rather than on the
+scale difference.
+
+The scales are declared, not fitted, as in both reference implementations
+(`BOND_SCALE`, `ANGLE_SCALE`). The centre is a reference structure's own
+internals, normally an energy-minimized one, so that structure whitens to the
+origin where a flow's base sits.
+
+**Add `whitener_log_abs_det_jacobian` to the density, not just the z-matrix
+term.** For alanine dipeptide the two are about `-85` and `-149` nats, so the
+whitening term is the larger of the pair. Being a constant is exactly what
+makes it easy to omit, invisible during training, and fatal to any free energy.
+
+`whitened_chart_bounds` gives the whitened image of `r > 0` and
+`theta in (0, pi)`, which is what a bounded flow domain needs. Bounds from data
+would be wrong: they would let a flow place mass on a negative bond length. On
+the same trajectory the nearest bound sits about 8 standard deviations from the
+sampled range, so bounding costs nothing physical.
 
 **Construction order is separate from atom order.** `ZMatrix.atom_order[c]` is
 the atom placed at construction step `c`; the reference arrays are indexed by
