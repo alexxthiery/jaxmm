@@ -98,8 +98,11 @@ Breaking any of these will break downstream users:
 # assuming one: `conda env list`, then verify with
 #   python -c "import jax, openmm, openmmtools, jaxopt"
 
-# Run all tests (324 tests; 2 skip without py3Dmol)
+# Default unit and numerical reference suite
 python -m pytest tests/ -v
+
+# Include long thermostat experiments and subprocess examples
+python -m pytest tests/ -m ""
 
 # Run a single test file
 python -m pytest tests/test_bonds.py -v
@@ -188,7 +191,7 @@ See CONTRIBUTING.md for the step-by-step template. Summary:
 5. Write tests in `tests/test_new_term.py` (vs OpenMM, gradients, JIT)
 6. Export from `__init__.py`
 7. Update README.md and CONTRIBUTING.md
-8. Run full test suite: `python -m pytest tests/ -v`
+8. Run full test suite: `python -m pytest tests/ -v -m ""`
 
 ## File reading order
 
@@ -269,3 +272,14 @@ To orient in the codebase, read in this order:
   still propagate NaN gradients.
 - Keep independent numerical references in tests independent. Similar geometry
   formulas with different sign/regularization conventions must not be merged.
+
+## Test cost and evidence
+
+- The default suite includes independent OpenMM energy/force checks. Only long
+  trajectory statistics and subprocess examples carry `pytest.mark.integration`.
+- Use `python -m pytest tests/ -m integration` for those experiments, or `-m ""`
+  for everything. Inspect `--durations=20` before optimizing test cost.
+- Reuse module-level JIT helpers; combine related support violations with a valid
+  control. Keep independent geometric Jacobians and force references.
+- Prefer exact histogram counts and prescribed random innovations over large
+  Monte Carlo assertions. Trajectory statistics must account for autocorrelation.

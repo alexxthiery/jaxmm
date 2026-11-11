@@ -173,7 +173,7 @@ def _get_gbsa_energy_openmm(system, positions_nm):
     """Compute GBSA energy from isolated GBSAOBCForce."""
     iso = _make_gbsa_only_system(system)
     integrator = openmm.VerletIntegrator(0.001 * unit.picosecond)
-    ctx = openmm.Context(iso, integrator, openmm.Platform.getPlatformByName("CPU"))
+    ctx = openmm.Context(iso, integrator, openmm.Platform.getPlatformByName("Reference"))
     ctx.setPositions(positions_nm * unit.nanometer)
     state = ctx.getState(getEnergy=True)
     energy = state.getPotentialEnergy().value_in_unit(unit.kilojoule_per_mole)
@@ -237,10 +237,10 @@ def test_total_energy_implicit_md_frames(
 def test_grad_gbsa_vs_openmm(
     aldp_implicit_system, aldp_implicit_md_frames, aldp_implicit_params
 ):
-    """JAX gradient matches OpenMM forces for implicit system across 10 frames."""
-    grad_fn = jax.grad(total_energy)
+    """JAX gradient matches OpenMM forces for implicit system across all 50 frames."""
+    grad_fn = jax.jit(jax.grad(total_energy))
 
-    for i in range(10):
+    for i in range(len(aldp_implicit_md_frames)):
         pos = aldp_implicit_md_frames[i]
         openmm_forces = get_openmm_forces(aldp_implicit_system, pos)
         jax_grad = np.array(grad_fn(jnp.array(pos), aldp_implicit_params))
@@ -276,14 +276,6 @@ def test_grad_gbsa_vs_finite_diff(aldp_implicit_positions, aldp_implicit_params)
     assert max_err < 1e-3, f"max finite diff error = {max_err:.6f}"
 
 
-def test_grad_gbsa_no_nan(aldp_implicit_md_frames, aldp_implicit_params):
-    """GBSA gradient has no NaN or Inf across 50 MD frames."""
-    grad_fn = jax.jit(jax.grad(gbsa_energy))
-
-    for i in range(50):
-        grad = grad_fn(jnp.array(aldp_implicit_md_frames[i]), aldp_implicit_params.gbsa)
-        assert not jnp.any(jnp.isnan(grad)), f"NaN in gradient at frame {i}"
-        assert not jnp.any(jnp.isinf(grad)), f"Inf in gradient at frame {i}"
 
 
 # ---------------------------------------------------------------------------

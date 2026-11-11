@@ -40,7 +40,7 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 ### Entry points
 
 - **Library**: `import jaxmm; params = jaxmm.extract_params(system)`
-- **Tests**: `python -m pytest tests/ -v` (324 tests, 93% branch coverage)
+- **Tests**: `python -m pytest tests/ -v` (default unit and numerical reference suite)
 - **Examples**: `examples/quickstart/quickstart.py` (start here), plus 10 topic folders.
   Each is a jupytext "percent" script with a generated README and a gitignored
   `output/`. Run them directly, or open as notebooks with jupytext installed. Do not
@@ -170,16 +170,41 @@ Add the new function to `__init__.py` imports and `__all__`.
 ### 6. Run the full suite
 
 ```bash
-python -m pytest tests/ -v
+python -m pytest tests/ -v -m ""
 ```
 
-All 155+ tests must pass before merging.
+The full suite must pass before merging.
 
 ## Testing conventions
 
+The default `python -m pytest tests/` includes independent OpenMM energy and
+force comparisons, geometric Jacobians, and deterministic integrator checks.
+The `integration` marker selects the two long thermostat experiments and the
+example subprocess. Run these explicitly, or clear the default marker filter
+to run everything:
+
+```bash
+python -m pytest tests/ -m integration
+python -m pytest tests/ -m ""
+python -m pytest tests/ --durations=20
+```
+
+Use exact count tables for histogram/free-energy checks and controlled innovations
+for single-step stochastic integrators. A finiteness check cannot establish the
+force sign, temperature scaling, or equilibrium law. Long trajectory checks use
+block means to account for autocorrelation and live outside the default unit suite.
+Use nondefault parameters and unequal masses where they distinguish wrong formulas.
+
+OpenMM fixtures use the Reference platform: for these small molecules it avoids
+CPU thread overhead while preserving all 50 MD comparison frames. Reuse compiled
+helpers across cases and combine related invalid events with a valid control.
+Retain independent numerical references; avoid repeated full-molecule gradients
+when an existing stronger comparison already covers the same path.
+
+
 - **Reference method**: each energy term is tested against an isolated OpenMM system containing only that force (not the force group API, which is unreliable). See `get_openmm_force_energy()` in `conftest.py`.
 - **Multi-frame**: test across MD frames, not just the minimized configuration. MD frames expose edge cases (close contacts, extreme torsion angles).
-- **Gradient check**: every energy function must have a test that `jax.grad` produces no NaN/Inf.
+- **Gradient check**: compare forces against an independent reference where available; include finiteness assertions in that comparison rather than a duplicate smoke test.
 - **JIT check**: every energy function must have a test that `jax.jit(fn)` matches the non-jit result.
 - **Independent oracles**: prefer an oracle the implementation cannot trivially satisfy. For the coordinate transforms that means `jacfwd` + `slogdet` for the Jacobian, the OpenMM topology bond graph for the ALDP z-matrix, and rigid-motion invariance plus distance-matrix preservation for `canonicalize_cartesian`. Idempotence alone is too weak: a wrong frame construction satisfies it.
 - **Validation tests**: every entry point that gathers by index needs a test that a stale index raises rather than clamping. See `tests/test_validation.py`.

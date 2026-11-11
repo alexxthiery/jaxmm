@@ -2,6 +2,8 @@
 
 Provides alanine dipeptide system, positions, MD frames, and a helper
 to compute OpenMM energy for an isolated force (single-force system).
+Reference avoids CPU thread overhead for these small molecules and gives
+high-precision oracles; all 50 trajectory frames are retained.
 """
 
 import warnings
@@ -72,7 +74,7 @@ def aldp_positions(aldp_testsystem):
             1.0 / unit.picosecond,
             1.0 * unit.femtosecond,
         ),
-        openmm.Platform.getPlatformByName("CPU"),
+        openmm.Platform.getPlatformByName("Reference"),
     )
     sim.context.setPositions(positions)
     sim.minimizeEnergy()
@@ -102,7 +104,7 @@ def aldp_md_frames(aldp_testsystem, aldp_positions):
             1.0 / unit.picosecond,
             1.0 * unit.femtosecond,
         ),
-        openmm.Platform.getPlatformByName("CPU"),
+        openmm.Platform.getPlatformByName("Reference"),
     )
     sim.context.setPositions(aldp_positions * unit.nanometer)
 
@@ -152,7 +154,7 @@ def aldp_implicit_positions(aldp_implicit_testsystem):
             1.0 / unit.picosecond,
             1.0 * unit.femtosecond,
         ),
-        openmm.Platform.getPlatformByName("CPU"),
+        openmm.Platform.getPlatformByName("Reference"),
     )
     sim.context.setPositions(positions)
     sim.minimizeEnergy()
@@ -176,7 +178,7 @@ def aldp_implicit_md_frames(aldp_implicit_testsystem, aldp_implicit_positions):
             1.0 / unit.picosecond,
             1.0 * unit.femtosecond,
         ),
-        openmm.Platform.getPlatformByName("CPU"),
+        openmm.Platform.getPlatformByName("Reference"),
     )
     sim.context.setPositions(aldp_implicit_positions * unit.nanometer)
 
@@ -230,7 +232,7 @@ def toluene_positions(toluene_testsystem):
             1.0 / unit.picosecond,
             1.0 * unit.femtosecond,
         ),
-        openmm.Platform.getPlatformByName("CPU"),
+        openmm.Platform.getPlatformByName("Reference"),
     )
     sim.context.setPositions(positions)
     sim.minimizeEnergy()
@@ -284,7 +286,7 @@ def get_openmm_force_energy(system, force_class, positions_nm):
 
     integrator = openmm.VerletIntegrator(0.001 * unit.picosecond)
     context = openmm.Context(
-        iso_system, integrator, openmm.Platform.getPlatformByName("CPU")
+        iso_system, integrator, openmm.Platform.getPlatformByName("Reference")
     )
     context.setPositions(positions_nm * unit.nanometer)
 
@@ -307,7 +309,7 @@ def get_openmm_total_energy(system, positions_nm):
     """
     integrator = openmm.VerletIntegrator(0.001 * unit.picosecond)
     context = openmm.Context(
-        system, integrator, openmm.Platform.getPlatformByName("CPU")
+        system, integrator, openmm.Platform.getPlatformByName("Reference")
     )
     context.setPositions(positions_nm * unit.nanometer)
 
@@ -330,7 +332,7 @@ def get_openmm_forces(system, positions_nm):
     """
     integrator = openmm.VerletIntegrator(0.001 * unit.picosecond)
     context = openmm.Context(
-        system, integrator, openmm.Platform.getPlatformByName("CPU")
+        system, integrator, openmm.Platform.getPlatformByName("Reference")
     )
     context.setPositions(positions_nm * unit.nanometer)
 

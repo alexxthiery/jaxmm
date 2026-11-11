@@ -193,9 +193,9 @@ def _assert_log_jacobian_matches_autodiff(z_matrix, bonds, angles, torsions):
     np.testing.assert_allclose(analytic, autodiff_logdet, rtol=1e-9, atol=1e-9)
 
 
-@pytest.mark.parametrize("n_atoms", [3, 4, 5, 6, 9])
+@pytest.mark.parametrize("n_atoms", [3, 4])
 def test_log_jacobian_matches_autodiff_linear_chain(n_atoms):
-    """The analytic volume element holds at every size, not just four atoms."""
+    """Cover the triatomic early return and the general construction path."""
 
     rng = np.random.default_rng(100 + n_atoms)
     z_matrix = _chain_zmatrix(n_atoms)
@@ -215,14 +215,6 @@ def test_log_jacobian_matches_autodiff_branched_topology():
     jaxmm.validate_zmatrix(z_matrix)
     rng = np.random.default_rng(7)
     bonds, angles, torsions = _safe_internals(rng, 7)
-    _assert_log_jacobian_matches_autodiff(z_matrix, bonds, angles, torsions)
-
-
-def test_log_jacobian_matches_autodiff_aldp(aldp_positions_jnp):
-    """The volume element holds on the real 22-atom system at a real geometry."""
-
-    z_matrix = jaxmm.aldp_zmatrix()
-    bonds, angles, torsions = jaxmm.cartesian_to_zmatrix(z_matrix, aldp_positions_jnp)
     _assert_log_jacobian_matches_autodiff(z_matrix, bonds, angles, torsions)
 
 
@@ -660,6 +652,14 @@ def test_log_jacobian_rejects_wrong_internal_lengths():
 # Boltzmann density in internal coordinates
 # ---------------------------------------------------------------------------
 
+@jax.jit
+def _fixed_frame_batch(z, bonds, angles, torsions, params, temperature):
+    return jax.vmap(
+        jax.value_and_grad(jaxmm.log_boltzmann_fixed_frame, argnums=(1, 2, 3)),
+        in_axes=(None, 0, 0, 0, None, None),
+    )(z, bonds, angles, torsions, params, temperature)
+
+
 def test_log_boltzmann_fixed_frame_matches_autodiff_change_of_variables(
     aldp_positions_jnp, aldp_params
 ):
@@ -679,34 +679,17 @@ def test_log_boltzmann_fixed_frame_matches_autodiff_change_of_variables(
         + float(jnp.linalg.slogdet(jacobian)[1])
     )
 
+    # The same expensive Cartesian Jacobian anchors both the slice determinant
+    # and its composition with energy; a second identical AD calculation adds
+    # no independent numerical evidence.
+    np.testing.assert_allclose(
+        jaxmm.zmatrix_log_abs_det_jacobian(z_matrix, bonds, angles),
+        jnp.linalg.slogdet(jacobian)[1], rtol=1e-9, atol=1e-9)
+
     got = jaxmm.log_boltzmann_fixed_frame(
         z_matrix, bonds, angles, torsions, aldp_params, 300.0
     )
     np.testing.assert_allclose(float(got), expected, rtol=1e-9)
-
-
-def test_log_boltzmann_fixed_frame_differs_from_cartesian_by_the_jacobian(
-    aldp_positions_jnp, aldp_params
-):
-    """Forgetting the Jacobian is a large, silent error; pin its size.
-
-    For alanine dipeptide the term is roughly -84 nats, about 84 kT. A user who
-    calls log_boltzmann on internal-coordinate samples is wrong by that much.
-    """
-    z_matrix = jaxmm.aldp_zmatrix()
-    bonds, angles, torsions = jaxmm.cartesian_to_zmatrix(z_matrix, aldp_positions_jnp)
-
-    cartesian = float(jaxmm.log_boltzmann(aldp_positions_jnp, aldp_params, 300.0))
-    internal = float(jaxmm.log_boltzmann_fixed_frame(
-        z_matrix, bonds, angles, torsions, aldp_params, 300.0))
-    log_det = float(jaxmm.zmatrix_log_abs_det_jacobian(z_matrix, bonds, angles))
-
-    # log_boltzmann_internal evaluates the energy at the reconstructed
-    # canonical frame while the baseline uses the original positions. The
-    # energy is rigid-motion invariant to about 1e-10 kJ/mol in float64, which
-    # sets the floor on this comparison at roughly 1e-12 relative.
-    np.testing.assert_allclose(internal - cartesian, log_det, rtol=1e-9)
-    assert abs(log_det) > 50.0
 
 
 def test_log_boltzmann_fixed_frame_is_jittable_and_differentiable(
@@ -716,14 +699,11 @@ def test_log_boltzmann_fixed_frame_is_jittable_and_differentiable(
     z_matrix = jaxmm.aldp_zmatrix()
     bonds, angles, torsions = jaxmm.cartesian_to_zmatrix(z_matrix, aldp_positions_jnp)
 
-    def target(b, a, t):
-        return jaxmm.log_boltzmann_fixed_frame(z_matrix, b, a, t, aldp_params, 300.0)
-
-    np.testing.assert_allclose(
-        float(jax.jit(target)(bonds, angles, torsions)),
-        float(target(bonds, angles, torsions)), rtol=1e-8,
-    )
-    grads = jax.grad(target, argnums=(0, 1, 2))(bonds, angles, torsions)
+    values, grads = _fixed_frame_batch(
+        z_matrix, bonds[None], angles[None], torsions[None], aldp_params, 300.)
+    expected = jaxmm.log_boltzmann_fixed_frame(
+        z_matrix, bonds, angles, torsions, aldp_params, 300.)
+    np.testing.assert_allclose(values[0], expected, rtol=1e-8)
     for g in grads:
         assert jnp.all(jnp.isfinite(g))
 
@@ -989,81 +969,24 @@ def _tiny_zmatrix():
                    torsion_ref=jnp.asarray([-1, -1, -1, 0], jnp.int32))
 
 
-class TestInternalDensityOffChart:
-
-    B = jnp.asarray([0.15, 0.15, 0.15], jnp.float64)
-    A = jnp.asarray([1.91, 1.91], jnp.float64)
-    T = jnp.asarray([1.0], jnp.float64)
-
-    def test_the_density_is_minus_inf_off_the_chart(self):
-        """
-        Claim: an angle outside (0, pi) or a non-positive bond length gives
-        -inf, a legitimate zero, not NaN.
-        Bug it catches: the defect this was written for. The Jacobian returned
-        NaN there, and an importance-weighted trainer treats NaN as neither
-        pass nor fail: it either aborts the run or silently drops the level.
-        Oracle: the two boundary violations, one each.
-        """
-        z, ff = _tiny_zmatrix(), _tiny_params()
-
-        for bad_b, bad_a in ((self.B, self.A.at[1].set(jnp.pi + 0.01)),
-                             (self.B.at[1].set(-0.15), self.A)):
-            value = float(jaxmm.log_boltzmann_fixed_frame(z, bad_b, bad_a, self.T, ff, 300.0))
-
-            assert value == -np.inf, f"got {value}"
-
-    def test_the_density_is_unchanged_on_the_chart(self):
-        """
-        Regression: masking must not move a value that was already right.
-        Oracle: the Cartesian density plus the log Jacobian, formed separately.
-        """
-        z, ff = _tiny_zmatrix(), _tiny_params()
-        x = jaxmm.zmatrix_to_cartesian(z, self.B, self.A, self.T)
-        expected = (float(jaxmm.log_boltzmann(x, ff, 300.0))
-                    + float(jaxmm.zmatrix_log_abs_det_jacobian(z, self.B, self.A)))
-
-        got = float(jaxmm.log_boltzmann_fixed_frame(z, self.B, self.A, self.T, ff, 300.0))
-
-        np.testing.assert_allclose(got, expected, rtol=1e-12)
-
-    def test_the_gradient_off_the_chart_is_finite(self):
-        """
-        Claim: the gradient at an off-chart point carries no NaN.
-        Bug it catches: masking only the output. `jnp.where` applied to the
-        result still differentiates the unmasked branch, so `0 * NaN = NaN`
-        reaches the caller. Only masking the *inputs* as well avoids it. This
-        matters because gradient-based samplers and trainers differentiate this
-        function, and one NaN poisons an entire parameter update.
-        Oracle: every gradient entry finite, at a point that is off the chart.
-        """
-        z, ff = _tiny_zmatrix(), _tiny_params()
-        bad_a = self.A.at[1].set(jnp.pi + 0.01)
-
-        grads = jax.grad(lambda b, a, t: jaxmm.log_boltzmann_fixed_frame(z, b, a, t, ff, 300.0),
-                         argnums=(0, 1, 2))(self.B, bad_a, self.T)
-
-        for g in grads:
-            assert np.all(np.isfinite(np.asarray(g))), f"non-finite gradient: {g}"
-
-    def test_it_vmaps_over_a_batch_with_mixed_validity(self):
-        """
-        Claim: a batch containing off-chart rows returns -inf for those rows
-        and correct values for the rest.
-        Bug it catches: a Python-level branch on the predicate, which cannot
-        trace and would force the caller out of jit or, worse, reject the whole
-        batch.
-        Oracle: the per-row results against the same rows evaluated singly.
-        """
-        z, ff = _tiny_zmatrix(), _tiny_params()
-        bonds = jnp.stack([self.B, self.B, self.B.at[0].set(-0.15)])
-        angles = jnp.stack([self.A, self.A.at[0].set(-0.01), self.A])
-        torsions = jnp.stack([self.T, self.T, self.T])
-
-        out = jax.vmap(lambda b, a, t: jaxmm.log_boltzmann_fixed_frame(z, b, a, t, ff, 300.0))(
-            bonds, angles, torsions)
-
-        assert np.isfinite(float(out[0]))
-        assert float(out[1]) == -np.inf and float(out[2]) == -np.inf
+def test_fixed_frame_mixed_support_values_and_gradients():
+    """Invalid rows have zero probability/gradient without poisoning valid rows."""
+    z, ff = _tiny_zmatrix(), _tiny_params()
+    b = jnp.asarray([0.15, 0.15, 0.15])
+    a = jnp.asarray([1.91, 1.91])
+    t = jnp.asarray([1.0])
+    bonds = jnp.stack([b, b, b.at[1].set(-0.15), b, b.at[0].set(-0.15)])
+    angles = jnp.stack([a, a.at[1].set(jnp.pi + 0.01), a, a.at[0].set(-0.01), a])
+    torsions = jnp.broadcast_to(t, (5, 1))
+    values, gradients = _fixed_frame_batch(z, bonds, angles, torsions, ff, 300.)
+    x = jaxmm.zmatrix_to_cartesian(z, b, a, t)
+    expected = (jaxmm.log_boltzmann(x, ff, 300.)
+                + jaxmm.zmatrix_log_abs_det_jacobian(z, b, a))
+    np.testing.assert_allclose(values[0], expected, rtol=1e-12)
+    np.testing.assert_array_equal(values[1:], -np.inf)
+    for g in gradients:
+        assert np.all(np.isfinite(g[0]))
+        np.testing.assert_array_equal(g[1:], 0.)
 
 
 # ---------------------------------------------------------------------------

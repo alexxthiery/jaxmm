@@ -30,13 +30,13 @@ def _finite_diff_grad(energy_fn, positions, params, h=1e-5):
 
 
 def test_grad_vs_openmm_forces(aldp_system, aldp_md_frames, aldp_params):
-    """JAX gradient matches OpenMM forces across 10 MD frames.
+    """JAX gradient matches OpenMM forces across all 50 MD frames.
 
     OpenMM forces = -dE/dx, so jax.grad(E) should equal -forces.
     """
-    grad_fn = jax.grad(total_energy)
+    grad_fn = jax.jit(jax.grad(total_energy))
 
-    for i in range(10):
+    for i in range(len(aldp_md_frames)):
         pos = aldp_md_frames[i]
         openmm_forces = get_openmm_forces(aldp_system, pos)
         jax_grad = np.array(grad_fn(jnp.array(pos), aldp_params))
@@ -76,14 +76,6 @@ def test_grad_vs_finite_diff(aldp_positions_jnp, aldp_params):
     assert max_err < 1e-3, f"max finite diff error = {max_err:.6f}"
 
 
-def test_grad_no_nan(aldp_md_frames, aldp_params):
-    """Gradient has no NaN or Inf across all 50 MD frames."""
-    grad_fn = jax.jit(jax.grad(total_energy))
-
-    for i in range(50):
-        grad = grad_fn(jnp.array(aldp_md_frames[i]), aldp_params)
-        assert not jnp.any(jnp.isnan(grad)), f"NaN in gradient at frame {i}"
-        assert not jnp.any(jnp.isinf(grad)), f"Inf in gradient at frame {i}"
 
 
 # ---------------------------------------------------------------------------
@@ -126,13 +118,8 @@ def test_grad_nonbonded_vs_finite_diff(aldp_positions_jnp, aldp_params):
 # Hessian (second derivatives)
 # ---------------------------------------------------------------------------
 
-def test_hessian_diatomic_finite_and_symmetric():
-    """Hessian of total_energy on a diatomic is finite and symmetric.
-
-    Uses a minimal 2-atom harmonic oscillator. The Hessian should be
-    a (6, 6) matrix (2 atoms x 3 coords flattened), symmetric, and finite.
-    This verifies JAX can compute second derivatives through the energy code.
-    """
+def test_hessian_diatomic_matches_hooke_curvature():
+    """Analytic radial/transverse curvature pins second derivatives and axes."""
     from jaxmm.extract import (
         ForceFieldParams, BondParams, AngleParams, TorsionParams, NonbondedParams,
     )
@@ -174,18 +161,19 @@ def test_hessian_diatomic_finite_and_symmetric():
         bonds=bonds, angles=angles, torsions=torsions,
         nonbonded=nonbonded, masses=jnp.array([12.0, 12.0]), n_atoms=2,
     )
-    positions = jnp.array([[0.0, 0.0, 0.0], [0.15, 0.0, 0.0]])
+    positions = jnp.array([[.01, -.03, .02], [.13, .07, .08]])
 
     def energy_flat(pos_flat):
         return total_energy(pos_flat.reshape(2, 3), params)
 
-    H = jax.hessian(energy_flat)(positions.ravel())
+    H = jax.jit(jax.hessian(energy_flat))(positions.ravel())
 
-    # Shape: (6, 6)
-    assert H.shape == (6, 6), f"Hessian shape = {H.shape}, expected (6, 6)"
-    # Finite
-    assert not jnp.any(jnp.isnan(H)), "NaN in Hessian"
-    assert not jnp.any(jnp.isinf(H)), "Inf in Hessian"
-    # Symmetric (Schwarz's theorem)
-    max_asym = float(jnp.max(jnp.abs(H - H.T)))
-    assert max_asym < 1e-6, f"Hessian not symmetric: max asymmetry = {max_asym}"
+    # For U(r)=k/2*(r-r0)^2: the radial eigenvalue is k and both
+    # transverse eigenvalues are k*(1-r0/r). Off-axis displacement tests
+    # cross derivatives; a constant zero Hessian would pass symmetry alone.
+    dr = np.asarray(positions[1]-positions[0])
+    radius = np.linalg.norm(dr)
+    radial = np.outer(dr, dr)/radius**2
+    block = 200000.*(radial + (1-.15/radius)*(np.eye(3)-radial))
+    expected = np.block([[block, -block], [-block, block]])
+    np.testing.assert_allclose(H, expected, rtol=1e-10, atol=1e-8)

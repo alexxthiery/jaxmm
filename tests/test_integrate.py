@@ -9,8 +9,6 @@ pytest.importorskip("openmm")
 
 
 import numpy as np
-import pytest
-
 import jax
 jax.config.update("jax_enable_x64", True)
 import jax.numpy as jnp
@@ -26,7 +24,7 @@ from jaxmm.extract import (
     TorsionParams,
     NonbondedParams,
 )
-from jaxmm.integrate import verlet, langevin_baoab, baoab_step, kinetic_energy, KB
+from jaxmm.integrate import verlet, langevin_baoab, baoab_step, kinetic_energy
 
 
 # ---------------------------------------------------------------------------
@@ -119,7 +117,7 @@ def test_verlet_vs_openmm_diatomic(diatomic):
     system.addForce(bond_force)
 
     integrator = openmm.VerletIntegrator(dt * unit.picosecond)
-    context = openmm.Context(system, integrator, openmm.Platform.getPlatformByName("CPU"))
+    context = openmm.Context(system, integrator, openmm.Platform.getPlatformByName("Reference"))
     context.setPositions(np.array(positions) * unit.nanometer)
 
     # OpenMM's VerletIntegrator is leapfrog: setVelocities sets v(t - dt/2).
@@ -177,6 +175,14 @@ def test_verlet_energy_conservation(diatomic):
 # Test 3: Langevin temperature equilibrium
 # ---------------------------------------------------------------------------
 
+def _mean_and_mcse(values):
+    # 4500 retained frames: 30 blocks of 150 frames (15 friction times each).
+    # Treating successive MD frames as independent understates uncertainty.
+    blocks = np.asarray(values).reshape(30, -1).mean(axis=1)
+    return blocks.mean(), blocks.std(ddof=1)/np.sqrt(len(blocks))
+
+
+@pytest.mark.integration
 def test_langevin_temperature_equilibrium(diatomic):
     """Langevin BAOAB thermalizes to correct temperature (equipartition)."""
     params, positions, velocities = diatomic
@@ -199,29 +205,18 @@ def test_langevin_temperature_equilibrium(diatomic):
 
     # Average KE over equilibrated trajectory
     ke_per_frame = jax.vmap(kinetic_energy, in_axes=(0, None))(vel_equil, params.masses)
-    avg_ke = float(jnp.mean(ke_per_frame))
-    n_samples = len(ke_per_frame)
-
-    # Expected from equipartition: <KE> = (n_dof/2) * kB * T, n_dof = 6
-    # Var(KE) = (n_dof/2) * (kB*T)^2 from the Gamma distribution
-    n_dof = 6
-    expected_ke = (n_dof / 2.0) * KB * temperature
-    theoretical_std = jnp.sqrt(n_dof / 2.0) * KB * temperature
-    # Naive std of mean (ignoring autocorrelation, so z is inflated)
-    naive_se = float(theoretical_std) / jnp.sqrt(n_samples)
-    z = abs(avg_ke - expected_ke) / naive_se
-    assert z < 5.0, (
-        f"Avg KE = {avg_ke:.4f}, expected {expected_ke:.4f}, "
-        f"z = {z:.1f} (>5, accounting for autocorrelation inflation)"
-    )
+    avg_ke, mcse = _mean_and_mcse(ke_per_frame)
+    expected_ke = 3 * .008314462618 * temperature  # six velocity DOFs
+    assert abs(avg_ke - expected_ke) < 5*mcse, (avg_ke, expected_ke, mcse)
 
 
 # ---------------------------------------------------------------------------
 # Test 4: Langevin bond length variance
 # ---------------------------------------------------------------------------
 
+@pytest.mark.integration
 def test_langevin_position_variance(diatomic):
-    """Bond length variance matches kB*T/k for harmonic oscillator."""
+    """Bond variance matches the harmonic radial law including its r² measure."""
     params, positions, velocities = diatomic
     dt = 0.001
     n_steps = 50000
@@ -242,18 +237,13 @@ def test_langevin_position_variance(diatomic):
     # Bond length: distance between atoms 0 and 1
     dr = pos_equil[:, 1, :] - pos_equil[:, 0, :]
     bond_lengths = jnp.linalg.norm(dr, axis=-1)
-    var_r = float(jnp.var(bond_lengths))
-    n_samples = len(bond_lengths)
-
-    # For harmonic bond, variance of bond length = kB*T / k_bond.
-    # For Gaussian samples, Var(sample_var) = 2*sigma^4 / (N-1).
-    expected_var = KB * temperature / k_bond
-    naive_se_var = jnp.sqrt(2.0) * expected_var / jnp.sqrt(n_samples - 1)
-    z = abs(var_r - expected_var) / float(naive_se_var)
-    assert z < 5.0, (
-        f"Bond length variance = {var_r:.6e}, expected {expected_var:.6e}, "
-        f"z = {z:.1f} (>5, accounting for autocorrelation inflation)"
-    )
+    var_r, mcse = _mean_and_mcse((bond_lengths - bond_lengths.mean())**2)
+    # The radial density includes r^2. Extending the Gaussian to negative r
+    # costs < 10^-390 here (r0/sigma > 42), giving this analytic variance.
+    sigma2 = .008314462618 * temperature / k_bond
+    mu = .15
+    expected_var = sigma2*(mu**4 + 3*sigma2**2)/(mu**2 + sigma2)**2
+    assert abs(var_r - expected_var) < 5*mcse, (var_r, expected_var, mcse)
 
 
 # ---------------------------------------------------------------------------
@@ -336,26 +326,47 @@ def test_kinetic_energy():
 # Test 8: baoab_step single step
 # ---------------------------------------------------------------------------
 
-def test_baoab_step_single(diatomic):
-    """baoab_step produces valid output: no NaN, positions change, forces update."""
-    from jaxmm.energy import total_energy
+def test_baoab_step_matches_analytic_update(diatomic, monkeypatch):
+    """Pin kick/drift order, force sign, unequal masses and thermostat scaling."""
+    from dataclasses import replace
+    import jaxmm.integrate as integrate
 
-    params, positions, velocities = diatomic
-    forces = -jax.grad(total_energy)(positions, params)
+    params, positions, _ = diatomic
+    masses = np.array([[12.], [16.]])
+    params = replace(params, masses=jnp.asarray(masses[:, 0]))
+    velocities = np.array([[.2, -.1, .05], [-.3, .2, -.15]])
+    forces = np.array([[2000., 0., 0.], [-2000., 0., 0.]])
+    innovations = np.array([[-1.2, .3, .7], [.4, -.8, 1.1]])
+    temperature, dt, friction = 427., .0007, 7.3
+
+    # Independent two-body Hooke law, with prescribed Gaussian innovations.
+    kicked = velocities + .5*dt*forces/masses
+    midpoint = np.asarray(positions) + .5*dt*kicked
+    damping = np.exp(-friction*dt)
+    thermal = damping*kicked + np.sqrt(
+        (1-damping**2)*.008314462618*temperature/masses)*innovations
+    expected_pos = midpoint + .5*dt*thermal
+    displacement = expected_pos[1] - expected_pos[0]
+    distance = np.linalg.norm(displacement)
+    force0 = 200000.*(distance-.15)*displacement/distance
+    expected_forces = np.stack([force0, -force0])
+    expected_vel = thermal + .5*dt*expected_forces/masses
+
+    def prescribed_noise(key, shape):
+        assert shape == innovations.shape
+        return jnp.asarray(innovations)
+
+    monkeypatch.setattr(integrate.random, "normal", prescribed_noise)
+    # A local compiled wrapper cannot leak this controlled RNG into other tests.
+    step = jax.jit(lambda p, v, f, key: baoab_step(
+        p, v, f, key, params, temperature, dt, friction, remove_com=False))
     key = random.key(99)
-
-    new_pos, new_vel, new_forces, new_key = baoab_step(
-        positions, velocities, forces, key, params,
-        temperature=300.0, dt=0.001, friction=10.0, remove_com=False,
-    )
-
-    assert not jnp.any(jnp.isnan(new_pos)), "NaN in positions"
-    assert not jnp.any(jnp.isnan(new_vel)), "NaN in velocities"
-    assert not jnp.any(jnp.isnan(new_forces)), "NaN in forces"
-    # Positions should change (system is stretched from equilibrium)
-    assert not jnp.allclose(positions, new_pos), "Positions unchanged after step"
-    # Forces should differ (positions changed)
-    assert not jnp.allclose(forces, new_forces), "Forces unchanged after step"
+    pos, vel, force, next_key = step(positions, jnp.asarray(velocities),
+                                    jnp.asarray(forces), key)
+    for got, expected in [(pos, expected_pos), (vel, expected_vel),
+                           (force, expected_forces)]:
+        np.testing.assert_allclose(got, expected, rtol=1e-10, atol=1e-10)
+    assert not np.array_equal(random.key_data(key), random.key_data(next_key))
 
 
 def test_md_trajectory_named_fields(diatomic):
@@ -413,34 +424,6 @@ def test_baoab_step_matches_langevin_baoab(diatomic):
     assert jnp.allclose(result.velocities, new_vel, atol=1e-12), (
         f"Velocity mismatch: {float(jnp.max(jnp.abs(result.velocities - new_vel)))}"
     )
-
-
-# ---------------------------------------------------------------------------
-# Test 10: baoab_step JIT consistency
-# ---------------------------------------------------------------------------
-
-def test_baoab_step_jit(diatomic):
-    """JIT-compiled baoab_step matches eager execution."""
-    from jaxmm.energy import total_energy
-
-    params, positions, velocities = diatomic
-    forces = -jax.grad(total_energy)(positions, params)
-    key = random.key(77)
-    dt, temperature, friction = 0.001, 300.0, 10.0
-
-    result_eager = baoab_step(
-        positions, velocities, forces, key, params,
-        temperature, dt, friction,
-    )
-    result_jit = jax.jit(baoab_step)(
-        positions, velocities, forces, key, params,
-        temperature, dt, friction,
-    )
-
-    for a, b in zip(result_eager, result_jit):
-        assert jnp.allclose(a, b, atol=1e-10), (
-            f"JIT mismatch: max diff = {float(jnp.max(jnp.abs(a - b)))}"
-        )
 
 
 # ---------------------------------------------------------------------------

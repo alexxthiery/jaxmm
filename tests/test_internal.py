@@ -56,22 +56,24 @@ def test_physical_density_and_parameter_derivative():
         jaxmm.total_energy(transform.to_cartesian(q), ff)/(jaxmm.KB*temperature**2), rtol=1e-12)
 
 
-@pytest.mark.parametrize("index,value", [
-    (0, 0.), (1, -0.1), (2, np.inf), (0, np.nan),
-    (3, 0.), (4, np.pi), (4, -1.), (5, np.pi), (5, np.inf), (5, np.nan),
-])
-def test_off_support_is_zero_probability_without_nan_gradients(index, value):
-    """Reject invalid events before energy/log evaluation, including torsions."""
+def test_off_support_is_zero_probability_without_nan_gradients():
+    """All boundaries share one compiled mixed batch; valid rows stay valid."""
     transform, q = geometry()
-    bad = q.at[index].set(value)
+    violations = [(0, 0.), (1, -.1), (2, np.inf), (0, np.nan),
+                  (3, 0.), (4, np.pi), (4, -1.), (5, np.pi),
+                  (5, np.inf), (5, np.nan)]
+    points = jnp.stack([q] + [q.at[i].set(v) for i, v in violations])
     ff = _tiny_params()
     call = lambda v: jaxmm.log_boltzmann_internal(
         transform.z_matrix, *transform.unpack(v), ff, 300.)
-    actual, gradient = jax.jit(jax.value_and_grad(call))(bad)
-    assert actual == -jnp.inf
-    np.testing.assert_array_equal(gradient, jnp.zeros_like(q))
-    with pytest.raises(ValueError, match="Expected finite bonds"):
-        transform.to_cartesian(bad)
+    actual, gradients = jax.jit(jax.vmap(jax.value_and_grad(call)))(points)
+    np.testing.assert_allclose(actual[0], call(q), atol=1e-10)
+    assert jnp.all(jnp.isfinite(gradients[0]))
+    np.testing.assert_array_equal(actual[1:], jnp.full(len(violations), -jnp.inf))
+    np.testing.assert_array_equal(gradients[1:], jnp.zeros_like(points[1:]))
+    for bad in points[1:]:
+        with pytest.raises(ValueError, match="Expected finite bonds"):
+            transform.to_cartesian(bad)
 
 
 def test_pack_roundtrip_batches_and_pytree_reconstruction():

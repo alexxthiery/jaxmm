@@ -17,7 +17,6 @@ import numpy as np
 import pytest
 
 import jaxmm
-from jaxmm.utils import KB
 from jaxmm.notebook import (
     _write_multimodel_pdb,
     free_energy_1d,
@@ -27,83 +26,33 @@ from jaxmm.notebook import (
 )
 
 
-# ---------------------------------------------------------------------------
-# Free energy: analytic oracle
-#
-# For samples from N(0, sigma) the free energy is exactly parabolic,
-# F(x) = kB*T * x^2 / (2 sigma^2) + const, so the fitted curvature has a
-# closed form to compare against. Tolerances below were measured, not guessed:
-# with these sample counts the 1D fit lands within 0.3% and the 2D all-bin fit
-# within 0.8%.
-# ---------------------------------------------------------------------------
-
-SIGMA = 0.5
-TEMPERATURE = 300.0
+# Exact histogram counts give known free energies without sampling error.
+# Powers of two make the expected differences integer multiples of kBT*log(2).
 
 
-def _expected_curvature():
-    """kB*T / (2 sigma^2), the analytic curvature of a Gaussian free energy."""
-    return KB * TEMPERATURE / (2.0 * SIGMA**2)
+def test_free_energy_1d_matches_known_population_ratios():
+    centers = np.array([-4., -2., 0., 2., 4.])
+    samples = np.repeat(centers, [1, 2, 4, 0, 8])
+    temperature = 427.
+    actual_centers, fe = free_energy_1d(samples, temperature, bins=5,
+                                      sample_range=(-5., 5.))
+    expected = 0.008314462618*temperature*np.log(2)*np.array([3., 2., 1., np.nan, 0.])
+    np.testing.assert_allclose(actual_centers, centers)
+    np.testing.assert_allclose(fe, expected, rtol=1e-12, equal_nan=True)
 
 
-def test_free_energy_1d_recovers_gaussian_curvature():
-    """F = -kBT ln P must reproduce the parabola of a known Gaussian."""
-    rng = np.random.default_rng(0)
-    samples = rng.normal(0.0, SIGMA, 400_000)
-
-    centers, fe = free_energy_1d(
-        samples, TEMPERATURE, bins=80, sample_range=(-2 * SIGMA, 2 * SIGMA))
-
-    finite = np.isfinite(fe)
-    curvature = np.polyfit(centers[finite], fe[finite], 2)[0]
-    np.testing.assert_allclose(curvature, _expected_curvature(), rtol=0.02)
-
-
-def test_free_energy_1d_is_shifted_to_zero_minimum():
-    """The reported minimum is exactly zero, which is what plots assume."""
-    rng = np.random.default_rng(1)
-    _, fe = free_energy_1d(rng.normal(0.0, SIGMA, 20_000), TEMPERATURE, bins=40)
-    assert np.nanmin(fe) == 0.0
-    assert np.all(fe[np.isfinite(fe)] >= 0.0)
-
-
-def test_free_energy_1d_marks_empty_bins_nan():
-    """Unvisited bins are NaN, not a spurious finite barrier height."""
-    samples = np.concatenate([np.zeros(1000), np.full(1000, 10.0)])
-    _, fe = free_energy_1d(samples, TEMPERATURE, bins=20, sample_range=(0.0, 10.0))
-    assert np.isnan(fe).any(), "the gap between the two populations should be NaN"
-    assert np.isfinite(fe[0]) and np.isfinite(fe[-1])
-
-
-def test_free_energy_2d_recovers_isotropic_gaussian_curvature():
-    """The 2D surface is fitted over every populated bin, not one slice."""
-    rng = np.random.default_rng(1)
-    x = rng.normal(0.0, SIGMA, 600_000)
-    y = rng.normal(0.0, SIGMA, 600_000)
-
-    x_centers, y_centers, fe = free_energy_2d(
-        x, y, TEMPERATURE, bins=40,
-        sample_range=((-2 * SIGMA, 2 * SIGMA), (-2 * SIGMA, 2 * SIGMA)))
-
-    grid_x, grid_y = np.meshgrid(x_centers, y_centers, indexing="ij")
-    radius_sq = (grid_x**2 + grid_y**2).ravel()
-    flat = fe.ravel()
-    finite = np.isfinite(flat)
-    design = np.vstack([radius_sq[finite], np.ones(finite.sum())]).T
-    curvature = np.linalg.lstsq(design, flat[finite], rcond=None)[0][0]
-
-    np.testing.assert_allclose(curvature, _expected_curvature(), rtol=0.03)
-    assert np.nanmin(fe) == 0.0
-
-
-def test_free_energy_2d_orientation_is_x_by_y():
-    """fe is indexed [x, y]; the docstring tells users to transpose for contourf."""
-    rng = np.random.default_rng(2)
-    x = rng.normal(0.0, 1.0, 20_000)
-    y = rng.normal(0.0, 0.2, 20_000)   # deliberately narrower in y
-    x_centers, y_centers, fe = free_energy_2d(x, y, TEMPERATURE, bins=(30, 20))
-
-    assert fe.shape == (len(x_centers), len(y_centers)) == (30, 20)
+def test_free_energy_2d_matches_known_asymmetric_population_table():
+    counts = np.array([[1, 2], [4, 0], [8, 16]])
+    ix, iy = np.indices(counts.shape)
+    x = np.repeat(np.array([-2., 0., 2.])[ix.ravel()], counts.ravel())
+    y = np.repeat(np.array([1., 3.])[iy.ravel()], counts.ravel())
+    temperature = 381.
+    xc, yc, fe = free_energy_2d(x, y, temperature, bins=(3, 2),
+                               sample_range=((-3., 3.), (0., 4.)))
+    expected = 0.008314462618*temperature*np.log(2)*np.array([[4., 3.], [2., np.nan], [1., 0.]])
+    np.testing.assert_allclose(xc, [-2., 0., 2.])
+    np.testing.assert_allclose(yc, [1., 3.])
+    np.testing.assert_allclose(fe, expected, rtol=1e-12, equal_nan=True)
 
 
 # ---------------------------------------------------------------------------

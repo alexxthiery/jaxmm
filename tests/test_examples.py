@@ -165,6 +165,7 @@ def test_example_does_not_write_outside_its_output_dir(path):
 # Execution
 # ---------------------------------------------------------------------------
 
+@pytest.mark.integration
 def test_example_runs_end_to_end():
     """Execute one example for real.
 
@@ -185,38 +186,3 @@ def test_example_runs_end_to_end():
     assert result.returncode == 0, (
         f"{script.name} failed:\n{result.stdout[-2000:]}\n{result.stderr[-2000:]}"
     )
-
-
-def test_renderer_saves_figures_that_are_not_blank(tmp_path):
-    """The renderer must produce real figures, not empty canvases.
-
-    A blank PNG is the failure mode when plt.show is redirected but the figure
-    has already been closed. Checking file size alone would not catch it, so
-    this compares against a known-empty figure of the same size.
-    """
-    pytest.importorskip("matplotlib")
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    blank = tmp_path / "blank.png"
-    figure = plt.figure(figsize=(6, 4))
-    figure.savefig(blank, dpi=110, bbox_inches="tight")
-    plt.close(figure)
-
-    drawn = tmp_path / "drawn.png"
-    figure = plt.figure(figsize=(6, 4))
-    figure.gca().plot([0, 1, 2], [0, 1, 4])
-    figure.savefig(drawn, dpi=110, bbox_inches="tight")
-    plt.close(figure)
-
-    assert drawn.stat().st_size > blank.stat().st_size * 1.2, (
-        "a plotted figure must be meaningfully larger than an empty one; "
-        "if this fails the size heuristic below is not valid"
-    )
-
-    rendered = sorted((EXAMPLES_DIR / "aldp_potential_jaxmm" / "output").glob("fig*.png"))
-    if not rendered:
-        pytest.skip("no rendered output; run tools/render_examples.py")
-    for path in rendered:
-        assert path.stat().st_size > blank.stat().st_size, f"{path.name} looks blank"

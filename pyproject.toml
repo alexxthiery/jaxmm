@@ -20,3 +20,7 @@ test = ["pytest>=7.0", "openmm>=8.0", "openmmtools>=0.23"]
 # open them as notebooks; matplotlib and py3Dmol back the plotting and 3D
 # viewer helpers in jaxmm.notebook. None of these were declared before.
 examples = ["matplotlib>=3.5", "py3Dmol>=2.0", "jupytext>=1.14"]
+
+[tool.pytest.ini_options]
+addopts = "-m 'not integration'"
+markers = ["integration: long trajectory statistics and subprocess examples (opt in with -m integration)"]
