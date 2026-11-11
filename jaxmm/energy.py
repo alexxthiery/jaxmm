@@ -6,7 +6,11 @@ Compatible with jax.jit, jax.vmap, and jax.grad.
 
 import jax
 import jax.numpy as jnp
-import numpy as np
+
+from jaxmm._validation import (
+    require_float64 as _check_x64, _check_positions_shape, _check_atom_count,
+    _check_atom_indices, _check_positions,
+)
 
 from jaxmm.extract import (
     BondParams,
@@ -21,100 +25,6 @@ from jaxmm.extract import (
     DIELECTRIC_OFFSET,
 )
 
-
-def _check_x64():
-    """Raise if JAX float64 is not enabled."""
-    if not jax.config.jax_enable_x64:
-        raise RuntimeError(
-            "jaxmm requires float64. Call jax.config.update('jax_enable_x64', True) "
-            "before importing jaxmm or using its functions."
-        )
-
-
-def _check_positions_shape(positions, term):
-    """Raise unless positions has shape (..., n_atoms, 3).
-
-    Args:
-        positions: Candidate coordinate array.
-        term: Name of the calling energy term, used in the message.
-
-    Raises:
-        ValueError: If the array is not at least 2D with a trailing axis of 3.
-    """
-    if jnp.ndim(positions) < 2:
-        raise ValueError(
-            f"{term}: positions must have shape (..., n_atoms, 3), got "
-            f"{jnp.shape(positions)}."
-        )
-    if positions.shape[-1] != 3:
-        raise ValueError(
-            f"{term}: positions last dimension is {positions.shape[-1]}, "
-            "expected 3 (x, y, z)."
-        )
-
-
-def _check_atom_count(positions, n_atoms, term):
-    """Raise unless positions holds exactly n_atoms atoms.
-
-    Used where the atom count is known statically, so the check costs nothing
-    and survives jit.
-
-    Args:
-        positions: Atom coordinates.
-        n_atoms: Atom count the parameters describe.
-        term: Name of the calling energy term, used in the message.
-
-    Raises:
-        ValueError: On a shape or count mismatch.
-    """
-    _check_positions_shape(positions, term)
-    if positions.shape[-2] != n_atoms:
-        raise ValueError(
-            f"{term}: positions has {positions.shape[-2]} atoms but parameters "
-            f"describe {n_atoms}. Check that positions matches the system."
-        )
-
-
-def _check_atom_indices(positions, arrays, term):
-    """Raise if any atom index falls outside positions.
-
-    JAX clamps an out-of-bounds gather to the last valid element instead of
-    raising, so a parameter set built for a larger system silently yields a
-    finite, wrong energy. Index values are only readable when they are
-    concrete, so this runs eagerly and is skipped under jit and vmap, where the
-    static shape checks are all that remain.
-
-    Args:
-        positions: Atom coordinates, shape (..., n_atoms, 3).
-        arrays: Sequence of (name, index_array) pairs to bounds check.
-        term: Name of the calling energy term, used in the message.
-
-    Raises:
-        ValueError: If any index is negative or >= n_atoms.
-    """
-    n_atoms = positions.shape[-2]
-    for name, array in arrays:
-        if isinstance(array, jax.core.Tracer) or array.size == 0:
-            continue
-        values = np.asarray(array)
-        highest, lowest = int(values.max()), int(values.min())
-        if highest >= n_atoms or lowest < 0:
-            offender = highest if highest >= n_atoms else lowest
-            raise ValueError(
-                f"{term}: {name} references atom {offender} but positions has "
-                f"{n_atoms} atoms (valid indices 0 to {n_atoms - 1}). JAX would "
-                "clamp this to a valid index and return a wrong energy."
-            )
-
-
-def _check_positions(positions, params):
-    """Raise if positions shape does not match params.n_atoms."""
-    _check_positions_shape(positions, "energy")
-    if positions.shape[-2] != params.n_atoms:
-        raise ValueError(
-            f"positions has {positions.shape[-2]} atoms but params expects "
-            f"{params.n_atoms}. Check that positions matches the system."
-        )
 
 # Coulomb constant in OpenMM units: kJ*nm/(mol*e^2)
 ONE_4PI_EPS0 = 138.93545764438198
@@ -686,24 +596,9 @@ def total_energy(positions: jax.Array, params: ForceFieldParams) -> jax.Array:
 
             grad_fn = jax.grad(my_energy)  # works with jit, vmap, grad
     """
-    _check_x64()
-    _check_positions(positions, params)
-    dist, dist_sq = _distance_matrix(positions, box=params.box)
-    e = (
-        bond_energy(positions, params.bonds)
-        + angle_energy(positions, params.angles)
-        + torsion_energy(positions, params.torsions)
-        + _nonbonded_energy_with_dist(params.nonbonded, dist)
-    )
-    if params.gbsa is not None:
-        e = e + _gbsa_energy_with_dist(positions, params.gbsa, dist, dist_sq)
-    if params.rb_torsions is not None:
-        e = e + rb_torsion_energy(positions, params.rb_torsions)
-    if params.cmap is not None:
-        e = e + cmap_energy(positions, params.cmap)
-    if params.restraints is not None:
-        e = e + restraint_energy(positions, params.restraints)
-    return e
+    # One dispatcher owns the optional force terms and shared distance matrix.
+    # Dictionary insertion order preserves the existing summation order.
+    return sum(energy_components(positions, params).values())
 
 
 def energy_components(positions: jax.Array, params: ForceFieldParams) -> dict:
@@ -717,9 +612,9 @@ def energy_components(positions: jax.Array, params: ForceFieldParams) -> dict:
         params: Complete force field parameters.
 
     Returns:
-        Dict with keys "bonds", "angles", "torsions", "nonbonded", and
-        optionally "gbsa" (only when params.gbsa is not None). Values are
-        scalar energies in kJ/mol.
+        Dict with keys "bonds", "angles", "torsions", "nonbonded", plus
+        "gbsa", "rb_torsions", "cmap" and "restraints" when configured.
+        Values are scalar energies in kJ/mol, in total summation order.
     """
     _check_x64()
     _check_positions(positions, params)

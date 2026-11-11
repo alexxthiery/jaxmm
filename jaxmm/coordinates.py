@@ -30,7 +30,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
-from jaxmm.energy import _check_positions_shape, _check_x64
+from jaxmm._validation import _check_positions_shape, require_float64 as _check_x64
 from jaxmm.extract import _register_pytree
 
 
@@ -159,6 +159,10 @@ def validate_zmatrix(z_matrix: ZMatrix) -> None:
     bond_ref = np.asarray(z_matrix.bond_ref)
     angle_ref = np.asarray(z_matrix.angle_ref)
     torsion_ref = np.asarray(z_matrix.torsion_ref)
+    for name, ref in (("bond_ref", bond_ref), ("angle_ref", angle_ref),
+                      ("torsion_ref", torsion_ref)):
+        if not np.issubdtype(ref.dtype, np.integer):
+            raise ValueError(f"{name} must contain integer indices, got {ref.dtype}")
     if bond_ref.ndim != 1:
         raise ValueError(f"bond_ref must be one-dimensional, got {bond_ref.shape}")
     if angle_ref.shape != bond_ref.shape or torsion_ref.shape != bond_ref.shape:
@@ -198,6 +202,8 @@ def validate_zmatrix(z_matrix: ZMatrix) -> None:
         )
     if z_matrix.atom_order is not None:
         order = np.asarray(z_matrix.atom_order)
+        if not np.issubdtype(order.dtype, np.integer):
+            raise ValueError(f"atom_order must contain integer indices, got {order.dtype}")
         if order.shape != (n_atoms,):
             raise ValueError(
                 f"atom_order must have length {n_atoms}, got {order.shape}")
@@ -509,6 +515,24 @@ def aldp_zmatrix() -> ZMatrix:
     )
     return ZMatrix(bond_ref=bond_ref, angle_ref=angle_ref, torsion_ref=torsion_ref,
                    atom_order=atom_order)
+
+
+def aldp_in_l_sector(positions: jax.Array) -> jax.Array:
+    """L-alanine handedness in openmmtools atom order, shape ``(...)``.
+
+    The signed tetrahedron at CA (8), ordered N (6), C (14), CB (10), is
+    positive in the supplied L structure. Zero is the planar sector boundary.
+    This support restriction does not alter the force field or identify atoms
+    related by permutation. Positions have shape ``(..., 22, 3)`` in nm.
+    """
+    _check_x64()
+    if positions.shape[-2:] != (22, 3):
+        raise ValueError(f"Expected alanine positions (..., 22, 3), got {positions.shape}.")
+    ca = positions[..., 8, :]
+    n = positions[..., 6, :] - ca
+    c = positions[..., 14, :] - ca
+    cb = positions[..., 10, :] - ca
+    return jnp.sum(jnp.cross(n, c)*cb, axis=-1) > 0
 
 
 # Per-type whitening scales, in nm and radians. Declared rather than fitted,

@@ -1,6 +1,6 @@
 # Codemap: jaxmm
 
-> Last updated: 2026-09-23
+> Coordinate API updated: 2026-11-11 (historical line/test counts below are approximate)
 
 Pure JAX molecular potential energy. OpenMM extracts force field params once;
 energy evaluation is pure JAX (jit, vmap, grad). Built for training normalizing
@@ -16,6 +16,9 @@ jaxmm/                  # core library (~2802 lines, 6 modules excluding noteboo
   energy.py              pure JAX energy functions + input validation (743 lines)
   integrate.py           Verlet + Langevin BAOAB integrators (226 lines)
   utils.py               minimize, log_boltzmann, dihedrals, serialization, constants (461 lines)
+  _validation.py         precision, temperature, shape and index checks
+  batching.py            shared event mapping with pytree outputs
+  internal.py            packed coordinates, physical volume, support and batch geometry
   coordinates.py         fixed-frame z-matrix transforms + log Jacobian (397 lines)
   notebook.py            Jupyter helpers: viz, Ramachandran, free energy (297 lines, not re-exported)
 tests/                   # 324 tests
@@ -35,6 +38,7 @@ tests/                   # 324 tests
   test_integrate.py      Verlet + Langevin BAOAB (17)
   test_minimize.py       L-BFGS minimization (4)
   test_serialization.py  save/load roundtrip incl. every optional field (8)
+  test_internal.py       physical volume vs full Cartesian Jacobian, support and tracing
   test_coordinates.py    z-matrix transforms, Jacobian vs autodiff, gradient safety, density (57)
   test_validation.py     defensive input validation across energy terms (12)
   test_notebook.py       free energy vs analytic Gaussian, angles, PDB writer (11)
@@ -52,36 +56,20 @@ tools/                   # developer scripts, not packaged
 ## Module dependency graph
 
 ```
-extract.py              jax, numpy
-    |                   (openmm imported lazily, only inside extract_params)
-    |
-    +---> energy.py     jax (imports dataclass types from extract.py)
-    |         |
-    |         +---> integrate.py    jax (imports total_energy from energy.py,
-    |         |                          KB from utils.py)
-    |         |
-    |         +---> coordinates.py  jax, numpy
-    |         |                     (imports _check_x64 and
-    |         |                      _check_positions_shape from energy.py,
-    |         |                      _register_pytree from extract.py)
-    |         |            |
-    |         +------------+---> utils.py   jax, numpy, jaxopt
-    |                            (ForceFieldParams from extract.py,
-    |                             total_energy from energy.py,
-    |                             z-matrix transforms from coordinates.py
-    |                             for log_boltzmann_internal)
-    |
-    +---> notebook.py   numpy, jax
-                        (imports KB, dihedral_angle from utils.py,
-                         phi_indices, psi_indices from extract.py;
-                         matplotlib, py3Dmol, openmm lazy-imported)
+_validation.py     JAX/NumPy checks, no energy dependency
+batching.py        JAX event mapping, no molecular dependency
+extract.py         parameter pytrees; OpenMM extraction is lazy
+coordinates.py    _validation + extract's pytree helper
+internal.py       coordinates + _validation + batching
+energy.py         extract types + _validation; one component dispatcher
+utils.py          energy + internal + batching + jaxopt
+integrate.py      energy + utility constants
+notebook.py       lazy plotting/viewer integration
 ```
 
-No circular dependencies. `energy.py` imports only type definitions from
-`extract.py`. `coordinates.py` is pure geometry: it touches no energy term and
-borrows only two private helpers, `_check_x64` and `_register_pytree`, so that
-precision checking and pytree registration have one home each.
-`notebook.py` is not re-exported from `__init__.py`.
+`InternalCoordinates.pullback` composes a Cartesian density with physical or
+fixed-frame volume and safe support rejection. It does not know force fields.
+`total_energy` sums `energy_components`; do not add a second force-term dispatcher.
 
 ## Modules
 
@@ -150,3 +138,11 @@ Core: `jax`, `numpy`, `jaxopt`.
 Extraction only: `openmm`, `openmmtools`.
 Tests: `pytest`, `openmm`, `openmmtools`.
 Notebooks: `matplotlib`, `py3Dmol` (lazy-imported).
+
+
+## Coordinate measure boundary (0.2)
+
+`internal.py` depends on `coordinates.py` for reconstruction, `_validation.py`
+for precision checks, `batching.py` for mapping, and `extract.py` for pytree registration. It does not evaluate
+energy. `utils.py` composes the transform with energy for the physical internal
+density and the explicitly named fixed-frame density. See README migration notes.

@@ -176,6 +176,7 @@ def _reduced_cartesian(z_matrix, flat, n_atoms):
     angles = flat[n_atoms - 1 : 2 * n_atoms - 3]
     torsions = flat[2 * n_atoms - 3 :]
     positions = jaxmm.zmatrix_to_cartesian(z_matrix, bonds, angles, torsions)
+    positions = positions[z_matrix.construction_order]
     return jnp.concatenate([positions[1, :1], positions[2, :2], positions[3:].ravel()])
 
 
@@ -497,15 +498,17 @@ def test_aldp_zmatrix_references_are_real_bonds(aldp_topology):
     z_matrix = jaxmm.aldp_zmatrix()
     bond_ref = np.asarray(z_matrix.bond_ref)
     angle_ref = np.asarray(z_matrix.angle_ref)
-
+    order = np.asarray(z_matrix.construction_order)
     for i in range(1, z_matrix.n_atoms):
-        assert bond_ref[i] in bonded[i], (
-            f"atom {i} uses bond reference {bond_ref[i]}, which is not bonded to it"
+        atom, reference = int(order[i]), int(order[bond_ref[i]])
+        assert reference in bonded[atom], (
+            f"atom {atom} uses bond reference {reference}, which is not bonded to it"
         )
     for i in range(2, z_matrix.n_atoms):
-        assert angle_ref[i] in bonded[bond_ref[i]], (
-            f"atom {i} uses angle reference {angle_ref[i]}, which is not bonded "
-            f"to its bond reference {bond_ref[i]}"
+        reference, center = int(order[angle_ref[i]]), int(order[bond_ref[i]])
+        assert reference in bonded[center], (
+            f"atom {int(order[i])} uses angle reference {reference}, which is not bonded "
+            f"to its bond reference {center}"
         )
 
 
@@ -657,7 +660,7 @@ def test_log_jacobian_rejects_wrong_internal_lengths():
 # Boltzmann density in internal coordinates
 # ---------------------------------------------------------------------------
 
-def test_log_boltzmann_internal_matches_autodiff_change_of_variables(
+def test_log_boltzmann_fixed_frame_matches_autodiff_change_of_variables(
     aldp_positions_jnp, aldp_params
 ):
     """The internal-coordinate density equals the Cartesian one plus log |det J|.
@@ -676,13 +679,13 @@ def test_log_boltzmann_internal_matches_autodiff_change_of_variables(
         + float(jnp.linalg.slogdet(jacobian)[1])
     )
 
-    got = jaxmm.log_boltzmann_internal(
+    got = jaxmm.log_boltzmann_fixed_frame(
         z_matrix, bonds, angles, torsions, aldp_params, 300.0
     )
     np.testing.assert_allclose(float(got), expected, rtol=1e-9)
 
 
-def test_log_boltzmann_internal_differs_from_cartesian_by_the_jacobian(
+def test_log_boltzmann_fixed_frame_differs_from_cartesian_by_the_jacobian(
     aldp_positions_jnp, aldp_params
 ):
     """Forgetting the Jacobian is a large, silent error; pin its size.
@@ -694,7 +697,7 @@ def test_log_boltzmann_internal_differs_from_cartesian_by_the_jacobian(
     bonds, angles, torsions = jaxmm.cartesian_to_zmatrix(z_matrix, aldp_positions_jnp)
 
     cartesian = float(jaxmm.log_boltzmann(aldp_positions_jnp, aldp_params, 300.0))
-    internal = float(jaxmm.log_boltzmann_internal(
+    internal = float(jaxmm.log_boltzmann_fixed_frame(
         z_matrix, bonds, angles, torsions, aldp_params, 300.0))
     log_det = float(jaxmm.zmatrix_log_abs_det_jacobian(z_matrix, bonds, angles))
 
@@ -706,7 +709,7 @@ def test_log_boltzmann_internal_differs_from_cartesian_by_the_jacobian(
     assert abs(log_det) > 50.0
 
 
-def test_log_boltzmann_internal_is_jittable_and_differentiable(
+def test_log_boltzmann_fixed_frame_is_jittable_and_differentiable(
     aldp_positions_jnp, aldp_params
 ):
     """The density must be usable as a flow training target."""
@@ -714,7 +717,7 @@ def test_log_boltzmann_internal_is_jittable_and_differentiable(
     bonds, angles, torsions = jaxmm.cartesian_to_zmatrix(z_matrix, aldp_positions_jnp)
 
     def target(b, a, t):
-        return jaxmm.log_boltzmann_internal(z_matrix, b, a, t, aldp_params, 300.0)
+        return jaxmm.log_boltzmann_fixed_frame(z_matrix, b, a, t, aldp_params, 300.0)
 
     np.testing.assert_allclose(
         float(jax.jit(target)(bonds, angles, torsions)),
@@ -733,8 +736,8 @@ def test_zmatrix_torsions_are_negated_dihedral_angle(aldp_positions_jnp, aldp_to
     """The two public APIs disagree by a sign, on purpose. Pin it.
 
     coordinates.py follows OpenMM's PeriodicTorsionForce; utils.dihedral_angle
-    negates to match mdtraj. Backbone phi and psi are z-matrix torsions 11 and
-    13, so anyone plotting a Ramachandran from them will hit this.
+    negates to match mdtraj. Backbone phi and psi are z-matrix torsions 12 and
+    5, so anyone plotting a Ramachandran from them will hit this.
     """
     z_matrix = jaxmm.aldp_zmatrix()
     torsions = jaxmm.cartesian_to_zmatrix(z_matrix, aldp_positions_jnp)[2]
@@ -742,8 +745,8 @@ def test_zmatrix_torsions_are_negated_dihedral_angle(aldp_positions_jnp, aldp_to
     phi = jaxmm.dihedral_angle(aldp_positions_jnp, jaxmm.phi_indices(aldp_topology))[0]
     psi = jaxmm.dihedral_angle(aldp_positions_jnp, jaxmm.psi_indices(aldp_topology))[0]
 
-    np.testing.assert_allclose(_angle_diff(torsions[11], -phi), 0.0, atol=1e-10)
-    np.testing.assert_allclose(_angle_diff(torsions[13], -psi), 0.0, atol=1e-10)
+    np.testing.assert_allclose(_angle_diff(torsions[12], -phi), 0.0, atol=1e-10)
+    np.testing.assert_allclose(_angle_diff(torsions[5], -psi), 0.0, atol=1e-10)
 
 
 def test_backbone_phi_psi_are_explicit_zmatrix_torsions(aldp_topology):
@@ -758,10 +761,13 @@ def test_backbone_phi_psi_are_explicit_zmatrix_torsions(aldp_topology):
     torsion_ref = np.asarray(z_matrix.torsion_ref)
 
     def quadruple(atom):
-        return [torsion_ref[atom], angle_ref[atom], bond_ref[atom], atom]
+        order = np.asarray(z_matrix.construction_order)
+        return order[[torsion_ref[atom], angle_ref[atom], bond_ref[atom], atom]]
 
-    np.testing.assert_array_equal(quadruple(14), np.asarray(jaxmm.phi_indices(aldp_topology))[0])
-    np.testing.assert_array_equal(quadruple(16), np.asarray(jaxmm.psi_indices(aldp_topology))[0])
+    # Reversing all four atoms preserves a dihedral; phi is constructed outward
+    # from the backbone in the opposite direction to the topology convention.
+    np.testing.assert_array_equal(quadruple(15)[::-1], np.asarray(jaxmm.phi_indices(aldp_topology))[0])
+    np.testing.assert_array_equal(quadruple(8), np.asarray(jaxmm.psi_indices(aldp_topology))[0])
 
 
 # ---------------------------------------------------------------------------
@@ -1002,7 +1008,7 @@ class TestInternalDensityOffChart:
 
         for bad_b, bad_a in ((self.B, self.A.at[1].set(jnp.pi + 0.01)),
                              (self.B.at[1].set(-0.15), self.A)):
-            value = float(jaxmm.log_boltzmann_internal(z, bad_b, bad_a, self.T, ff, 300.0))
+            value = float(jaxmm.log_boltzmann_fixed_frame(z, bad_b, bad_a, self.T, ff, 300.0))
 
             assert value == -np.inf, f"got {value}"
 
@@ -1016,7 +1022,7 @@ class TestInternalDensityOffChart:
         expected = (float(jaxmm.log_boltzmann(x, ff, 300.0))
                     + float(jaxmm.zmatrix_log_abs_det_jacobian(z, self.B, self.A)))
 
-        got = float(jaxmm.log_boltzmann_internal(z, self.B, self.A, self.T, ff, 300.0))
+        got = float(jaxmm.log_boltzmann_fixed_frame(z, self.B, self.A, self.T, ff, 300.0))
 
         np.testing.assert_allclose(got, expected, rtol=1e-12)
 
@@ -1033,7 +1039,7 @@ class TestInternalDensityOffChart:
         z, ff = _tiny_zmatrix(), _tiny_params()
         bad_a = self.A.at[1].set(jnp.pi + 0.01)
 
-        grads = jax.grad(lambda b, a, t: jaxmm.log_boltzmann_internal(z, b, a, t, ff, 300.0),
+        grads = jax.grad(lambda b, a, t: jaxmm.log_boltzmann_fixed_frame(z, b, a, t, ff, 300.0),
                          argnums=(0, 1, 2))(self.B, bad_a, self.T)
 
         for g in grads:
@@ -1053,7 +1059,7 @@ class TestInternalDensityOffChart:
         angles = jnp.stack([self.A, self.A.at[0].set(-0.01), self.A])
         torsions = jnp.stack([self.T, self.T, self.T])
 
-        out = jax.vmap(lambda b, a, t: jaxmm.log_boltzmann_internal(z, b, a, t, ff, 300.0))(
+        out = jax.vmap(lambda b, a, t: jaxmm.log_boltzmann_fixed_frame(z, b, a, t, ff, 300.0))(
             bonds, angles, torsions)
 
         assert np.isfinite(float(out[0]))

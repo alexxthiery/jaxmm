@@ -40,35 +40,22 @@ OpenMM System -> extract_params() -> ForceFieldParams (frozen dataclass, pytree)
 
 ## Module dependency graph
 
-```
-extract.py          <-- jax, numpy (openmm imported lazily, only in extract_params)
-    |
-    v
-energy.py           <-- jax, extract.py (dataclass types only)
-    |
-    +--------+-------------+
-    |        |             |
-    v        v             v
-integrate.py  coordinates.py ----+
-    |               |              |
-    v               v              v
-  jax, energy.py, jax, numpy    utils.py
-  utils.py (KB)   (energy.py    (extract.py, energy.py,
-                   _check_x64,   coordinates.py for
-                   _check_       log_boltzmann_internal)
-                   positions_    |
-                   shape)        v
-                               jaxopt
+- `_validation.py`: precision, scalar temperature, shape and atom-index checks.
+  It imports JAX/NumPy only. `energy.py` retains aliases for existing private checks.
+- `batching.py`: `map_events`, shared scalar-event mapping with pytree outputs.
+- `extract.py`: frozen parameter pytrees and lazy OpenMM extraction.
+- `coordinates.py`: pure geometric primitives; imports validation and pytree helpers,
+  never energy evaluation or OpenMM.
+- `internal.py`: packed coordinate interface and `pullback`; depends on coordinates,
+  validation and batching. Its density callback is independent of force fields.
+- `energy.py`: one `energy_components` dispatcher; `total_energy` sums its values.
+- `utils.py`: composes energies with coordinate pullbacks, minimization and serialization.
+- `integrate.py`: dynamics using energy gradients.
+- `notebook.py`: lazy plotting/viewer imports, not re-exported from the package root.
 
-notebook.py         <-- utils.py (KB, dihedral_angle), extract.py (phi/psi_indices)
-                        matplotlib, py3Dmol, openmm (all lazy-imported)
-```
-
-No circular dependencies. `energy.py` imports only type definitions from
-`extract.py`, never extraction logic. `coordinates.py` is pure geometry: it
-touches no energy term and borrows only private helpers (`_check_x64`,
-`_check_positions_shape`, `_register_pytree`). `utils.py` depends on
-`coordinates.py` for `log_boltzmann_internal`. `notebook.py` is not re-exported from `__init__.py`.
+There are no circular imports. Do not add molecule-specific masking or reconstruction
+paths to downstream wrappers: use `InternalCoordinates.pullback(cartesian_target, q,
+reference=q0)`. It owns chart rejection, safe reconstruction and the chosen volume.
 
 ## Key patterns
 
@@ -149,12 +136,12 @@ These are the most common sources of bugs and confusion:
   atom count) always run; index-bound checks read values, so they run eagerly and are
   skipped under jit and vmap where the arrays are tracers. If you add an entry point that
   gathers by index, add the check.
-- **`log_boltzmann` is the Cartesian density**: for internal-coordinate samples use
-  `log_boltzmann_internal`, which adds `log |det J|`. The term is about -84 nats for
-  alanine dipeptide, roughly 84 kBT. Omitting it is the standard silent error when
-  training a flow in internal coordinates.
-- **Backbone phi and psi are explicit z-matrix torsions**: `torsions[11]` and
-  `torsions[13]` for the shipped ALDP z-matrix, matching `phi_indices` and `psi_indices`.
+- **`log_boltzmann` is the Cartesian factor**: internal-coordinate samples use
+  `log_boltzmann_internal`, which includes the physical conformational volume.
+  `log_boltzmann_fixed_frame` explicitly requests the distinct Cartesian slice
+  measure. Never substitute the slice determinant for the MD marginal volume.
+- **Backbone phi and psi are explicit z-matrix torsions**: `torsions[12]` and
+  `torsions[5]` for the shipped ALDP z-matrix, matching `phi_indices` and `psi_indices`.
   That is why these coordinates suit a flow, and why the sign gotcha below matters.
 - **Z-matrix torsions are the negative of `dihedral_angle`**: `coordinates.py` follows
   OpenMM, `utils.dihedral_angle` negates to match mdtraj. A Ramachandran plot built from
@@ -197,7 +184,7 @@ See CONTRIBUTING.md for the step-by-step template. Summary:
 1. Add frozen dataclass in `extract.py`, register as pytree
 2. Add extraction function in `extract.py`, wire into `extract_params()`
 3. Add energy function in `energy.py` following `(positions, params) -> scalar` pattern
-4. Wire into `total_energy()` and `energy_components()`
+4. Add the term to `energy_components()`; `total_energy()` sums its values
 5. Write tests in `tests/test_new_term.py` (vs OpenMM, gradients, JIT)
 6. Export from `__init__.py`
 7. Update README.md and CONTRIBUTING.md
@@ -245,3 +232,40 @@ To orient in the codebase, read in this order:
   is phi and `torsions[5]` is psi. Rooting anywhere that moves with phi loses all three properties.
 - Internal coordinates are fixed-frame only: no free rigid-body degrees of freedom,
   so the map covers molecular shape, not absolute position or orientation
+
+
+## Physical internal-coordinate API (0.2)
+
+- `InternalCoordinates(ZMatrix)` owns packed `[bonds, angles, torsions]` geometry,
+  physical `log_volume`, support, bounds and periodic metadata. Float64 is required.
+- `log_boltzmann_internal` now marginalizes rigid motions: all bonds contribute
+  `2 log b`, all angles contribute `log sin a`. The constant orientation volume
+  `8*pi**2` and translation volume are omitted. This is the Cartesian MD
+  conformational law. `log_boltzmann_fixed_frame` explicitly retains the old slice
+  measure; `zmatrix_log_abs_det_jacobian` still computes that geometric determinant.
+- Densities return `-inf` off support (including nonfinite coordinates and torsions
+  outside `[-pi, pi)`) and substitute valid inputs before differentiation. This is
+  deliberate zero probability, not an arithmetic failure. Geometry conversion
+  rejects concrete invalid inputs. Shape/dtype checks remain active under JIT;
+  value validation cannot raise on tracers. Use `in_support` inside compiled code.
+- The ALDP L sector is the positive signed tetrahedron N(6), C(14), CB(10) about
+  CA(8); `aldp_in_l_sector` supplies the shared Cartesian/internal support predicate.
+- Scientific tests live in `tests/test_internal.py`: a full Cartesian Jacobian
+  including translation/rotation independently anchors the physical volume.
+
+
+## Reuse boundaries
+
+- A physical internal target is the pullback of its Cartesian callable, including
+  additional support such as chirality. Do not bypass a target's `__call__` to read
+  its fields and independently re-evaluate energy.
+- `map_events` is the only batch-axis flatten/map/restore implementation.
+- `require_float64` and `validate_temperature` are the shared public checks for
+  downstream molecular wrappers. Numeric validation skips tracers/placeholders;
+  shape/dtype checks remain active. Boolean/string/complex temperatures are invalid.
+- `InternalCoordinates` owns fallback construction and both volume formulas.
+  Separate reconstruction for the support predicate and for safe differentiation
+  is intentional: masking an invalid reconstruction only after evaluation can
+  still propagate NaN gradients.
+- Keep independent numerical references in tests independent. Similar geometry
+  formulas with different sign/regularization conventions must not be merged.

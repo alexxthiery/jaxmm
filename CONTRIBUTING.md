@@ -33,7 +33,7 @@ extract_params()  -->  ForceFieldParams (frozen dataclass, JAX pytree)
 | `jaxmm/energy.py` | Energy functions | jax, extract.py (dataclass types only) |
 | `jaxmm/integrate.py` | Verlet, Langevin BAOAB, and `baoab_step` (single-step building block) | jax, energy.py |
 | `jaxmm/utils.py` | minimize_energy, log_boltzmann, log_boltzmann_internal, dihedral angles, unit constants, serialization | energy.py, coordinates.py, numpy, jaxopt |
-| `jaxmm/coordinates.py` | Fixed-frame z-matrix transforms, log Jacobian, ALDP z-matrix | jax, numpy, `_check_x64` from energy.py, `_register_pytree` from extract.py |
+| `jaxmm/coordinates.py` | Fixed-frame z-matrix transforms, log Jacobian, ALDP z-matrix | jax, numpy, precision/shape checks from _validation.py, `_register_pytree` from extract.py |
 | `jaxmm/notebook.py` | Jupyter helpers: 3D viz, Ramachandran, free energy estimation | matplotlib, py3Dmol, openmm (all lazy) |
 | `tests/conftest.py` | ALDP fixtures (vacuum + implicit) + OpenMM reference helpers | openmm, openmmtools, jaxmm |
 
@@ -137,7 +137,7 @@ def new_term_energy(positions: jnp.ndarray, params: NewTermParams) -> float:
     return jnp.sum(...)
 ```
 
-Add it to `total_energy()`.
+Add it to `energy_components()`; `total_energy()` sums that dispatcher.
 
 ### 4. Write tests
 
@@ -243,3 +243,27 @@ development experience.
 - Comments explain "why", not "what".
 - Match existing patterns. If the other energy functions do it one way, do it the same way.
 - No unnecessary abstractions. A new energy term is one dataclass + one function + one test file.
+
+
+## Internal-coordinate measures
+
+`InternalCoordinates` is a frozen registered pytree, with only a `ZMatrix` field.
+Derive dimensions and coordinate blocks from that field. Keep geometry independent
+of force fields and temperature. The physical volume and fixed-frame determinant
+are different quantities: test the former against a full Cartesian Jacobian with
+external pose variables, and the latter against the reduced Cartesian slice.
+Malformed metadata raises; out-of-support density events return `-inf` after safe
+input substitution. Never clip a negative bond into a valid event. Preserve
+jit/vmap, parameter differentiation, and empty batches. See `tests/test_internal.py`.
+
+
+## Single evaluation paths
+
+`energy_components` owns the dispatch of every mandatory and optional energy term;
+`total_energy` sums its values in insertion order. Add new terms only to that
+component dispatcher, and test their independently known contribution.
+`InternalCoordinates.pullback` owns the chart, fallback, volume and callback support
+of transformed densities. A downstream target should delegate its Cartesian
+callable, rather than copy masking and energy evaluation. `map_events` is the common
+batching primitive; `require_float64` and `validate_temperature` are common checks.
+Keep numerical test oracles independent of these production helpers.

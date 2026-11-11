@@ -124,15 +124,13 @@ positions = jaxmm.zmatrix_to_cartesian(z, bonds, angles, torsions)
 logp = jaxmm.log_boltzmann_internal(z, bonds, angles, torsions, params, 300.0)
 ```
 
-**Use `log_boltzmann_internal`, not `log_boltzmann`, for internal-coordinate
-samples.** `log_boltzmann` returns the density with respect to Cartesian
-coordinates. The change of variables adds `log |det J|`, which for alanine
-dipeptide is about `-84` nats, or 210 kJ/mol, or 84 kBT. Omitting it is silent
-and large enough to make any reweighting or free-energy estimate meaningless.
+`log_boltzmann_internal` returns the physical conformational density, including
+all radial and angular volume factors. It differs from the density in the flat
+fixed-frame Cartesian slice. See the 0.2 measure and migration conventions below.
 
 **Backbone phi and psi are explicit z-matrix torsions.** For the shipped ALDP
 z-matrix, `torsions[12]` is phi and `torsions[5]` is psi, matching
-`phi_indices` and `psi_indices` exactly. This is what makes these coordinates
+`phi_indices` and `psi_indices` with the opposite sign (the biochemical convention). This is what makes these coordinates
 suitable for a flow: the slow collective variables are sampled directly rather
 than being nonlinear functions of the sampled variables.
 
@@ -361,3 +359,87 @@ from jaxmm.notebook import show_structure, animate_trajectory, plot_ramachandran
 | `free_energy_2d(x, y, T)` | 2D free energy surface |
 
 Extra dependencies (lazy-imported): `matplotlib`, `py3Dmol`, `openmm`.
+
+
+## Physical internal coordinates (0.2)
+
+```python
+transform = jaxmm.InternalCoordinates(jaxmm.aldp_zmatrix())
+q = transform.to_internal(positions)       # (..., 22, 3) -> (..., 60)
+x_fixed = transform.to_cartesian(q)       # rigid pose is discarded
+bonds, angles, torsions = transform.unpack(q)
+log_p = jaxmm.log_boltzmann_internal(
+    transform.z_matrix, bonds, angles, torsions, params, temperature=300.0)
+```
+
+The packed order is 21 bonds (nm), 20 angles (radians), 19 torsions (radians).
+`transform.bounds`, `periodic_indices`, `in_support(q)` and `validate(q)` expose
+sampler setup without private indices. Transform methods accept arbitrary batch
+axes, including empty batches. The energy evaluator accepts one event; use `vmap`
+for a batch. Both float64 mode and float64 coordinate arrays are required.
+
+`transform.log_volume(q)` is the physical internal volume after marginalizing
+rigid motions:
+
+$$
+\log V(q) = 2\sum_i\log b_i + \sum_j\log\sin a_j.
+$$
+
+The translation volume and constant orientation volume $8\pi^2$ are omitted.
+This gives the conformational law of flexible Cartesian equilibrium sampling.
+Zero/negative bonds, angles outside $(0,\pi)$, nonfinite coordinates, and torsions
+outside $[-\pi,\pi)$ have zero probability. Densities return `-inf` with zero
+rejection gradients; they substitute safe coordinates before evaluating energy.
+Geometry conversions raise on concrete invalid inputs; use `in_support` for
+compiled rejection. Collinear construction references are also excluded.
+A box or external position restraints invalidate this rigid-motion marginal and
+are rejected. Unknown numeric values inside JIT are not host-validated.
+
+**Migration from 0.1:** `log_boltzmann_internal` now uses the physical volume.
+Use `log_boltzmann_fixed_frame` for the previous Cartesian slice density.
+`zmatrix_log_abs_det_jacobian` and `transform.fixed_frame_log_det` retain their
+geometric slice meaning. The two densities differ by
+$2\log b_0 + \log b_1 + \log\sin a_0$, which is not a constant.
+See [Potter and Gilson, Eq. 13](https://doi.org/10.1021/jp0135407).
+
+Whitening remains a separate affine map (`internal_whitener`, `whiten_internals`,
+`unwhiten_internals`). It rescales coordinates but does not enforce support.
+Add `whitener_log_abs_det_jacobian` when evaluating a density in whitened variables.
+
+
+## Reusing coordinate densities and batching
+
+A Cartesian target can be any callable with input `(..., N, 3)` and output
+matching the leading batch shape. The physical pullback includes chart support,
+safe reconstruction and the volume term in one operation:
+
+```python
+transform = jaxmm.InternalCoordinates(jaxmm.aldp_zmatrix())
+q0 = transform.to_internal(reference_positions)
+
+def cartesian_target(x):
+    return jaxmm.map_events(
+        lambda y: jaxmm.log_boltzmann(y, params, 300.0), x, event_ndim=2)
+
+log_p = transform.pullback(cartesian_target, q, reference=q0)
+# Explicit compatibility measure:
+log_p_slice = transform.pullback(
+    cartesian_target, q, reference=q0, measure="fixed_frame")
+```
+
+The callable must describe a rotation/translation-invariant target when using
+the physical measure. Its own support restrictions are retained: a callback
+returning `-inf` also suppresses the volume gradient. A callback with a wrong
+output shape raises. Concrete NaN or positive-infinite callback results raise;
+under JIT these arithmetic failures remain visible rather than being silently
+converted to zero probability. Supply a valid reference if the generic geometric
+fallback is singular for your energy model.
+
+`map_events` maps scalar-event functions over multiple or empty batch axes and
+supports array or pytree outputs. Geometry and energies use the same mapper.
+`require_float64` and `validate_temperature` expose the same precision/scalar
+checks used by the backend, so downstream wrappers need not copy them.
+
+`energy_components` owns force-term dispatch and the shared pair-distance matrix;
+`total_energy` sums those components in insertion order. Add optional terms in
+one dispatcher, rather than maintaining parallel total and diagnostic paths.

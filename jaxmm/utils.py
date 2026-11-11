@@ -14,14 +14,12 @@ import jax
 import jax.numpy as jnp
 import jaxopt
 
+from jaxmm.internal import InternalCoordinates
+from jaxmm._validation import validate_temperature
+from jaxmm.batching import map_events
 from jaxmm.extract import ForceFieldParams
 from jaxmm.energy import total_energy, _check_x64
-from jaxmm.coordinates import (
-    ZMatrix,
-    zmatrix_in_domain,
-    zmatrix_log_abs_det_jacobian,
-    zmatrix_to_cartesian,
-)
+from jaxmm.coordinates import ZMatrix
 
 # Boltzmann constant in kJ/(mol*K)
 KB = 8.314462618e-3
@@ -72,10 +70,8 @@ def log_boltzmann(positions: jax.Array, params: ForceFieldParams, temperature: f
     """Compute log unnormalized Boltzmann factor: -E(x) / (kB * T).
 
     This is the density with respect to **Cartesian** coordinates. If your
-    samples come from internal coordinates, this is not the density you want:
-    the change of variables contributes a log-Jacobian term that is large
-    (roughly -84 for alanine dipeptide, about 84 kBT). Use
-    `log_boltzmann_internal` instead, which adds it for you.
+    samples come from internal coordinates, use ``log_boltzmann_internal`` or
+    ``InternalCoordinates.pullback`` to include the physical volume factor.
 
     Args:
         positions: Atom coordinates, shape (n_atoms, 3) in nm.
@@ -85,8 +81,26 @@ def log_boltzmann(positions: jax.Array, params: ForceFieldParams, temperature: f
     Returns:
         Scalar (dimensionless).
     """
+    validate_temperature(temperature)
     energy = total_energy(positions, params)
     return -energy / (KB * temperature)
+
+
+def _internal_density(z_matrix, bonds, angles, torsions, params, temperature, physical):
+    """One safe energy path for the two explicitly distinguished measures."""
+    transform = InternalCoordinates(z_matrix)
+    q = transform.pack(bonds, angles, torsions)
+    if q.ndim != 1:
+        raise ValueError("Expected one internal event; use jax.vmap for batches.")
+    if not isinstance(params, ForceFieldParams):
+        raise TypeError("params must be ForceFieldParams.")
+    if params.n_atoms != transform.n_atoms:
+        raise ValueError(f"Expected {transform.n_atoms} force-field atoms, got {params.n_atoms}.")
+    if params.restraints is not None or params.box is not None:
+        raise ValueError("Internal densities require a rotation/translation-invariant system: no box or position restraints.")
+    return transform.pullback(
+        lambda x: map_events(lambda y: log_boltzmann(y, params, temperature), x, 2),
+        q, measure="physical" if physical else "fixed_frame")
 
 
 def log_boltzmann_internal(
@@ -97,50 +111,41 @@ def log_boltzmann_internal(
     params: ForceFieldParams,
     temperature: float,
 ) -> jax.Array:
-    """Log unnormalized Boltzmann density in fixed-frame internal coordinates.
+    """Physical internal Boltzmann density after marginalizing rigid motions.
 
-    Applies the change of variables to the Cartesian Boltzmann density::
-
-        log p(b, a, t) = -E(x(b, a, t)) / (kB * T) + log |det dx/d(b, a, t)|
-
-    Omitting the Jacobian term is the standard error when training a flow in
-    internal coordinates. It is silent and large: for alanine dipeptide it is
-    about -84 nats, or 210 kJ/mol, which is enough to make any reweighting or
-    free-energy estimate meaningless.
-
-    Returns -inf off the chart the transform inverts, ``r > 0`` and
-    ``theta in (0, pi)`` (see ``zmatrix_in_domain``). That is the correct
-    value, not a guard: outside the chart the internal-to-Cartesian map is
-    exactly 2-to-1, so the change of variables does not hold and a density
-    formed from the Jacobian there would double count. Off-chart inputs are
-    also substituted before the energy is evaluated, so the gradient carries
-    no NaN into a caller that differentiates this function.
+    Returns ``-U(x)/(kB*T) + 2*sum(log(bonds)) + sum(log(sin(angles)))``.
+    Lengths are nm; angles are radians. The translation volume and constant
+    orientation volume 8*pi**2 are omitted. This is the conformational law of
+    unconstrained Cartesian equilibrium sampling, not the flat Cartesian slice.
 
     Args:
-        z_matrix: Z-matrix references for ``n_atoms`` atoms.
-        bonds: Bond lengths in nm, shape ``(n_atoms - 1,)``.
-        angles: Bond angles in radians, shape ``(n_atoms - 2,)``.
-        torsions: Torsion angles in radians, shape ``(n_atoms - 3,)``.
-        params: Force field parameters.
-        temperature: Temperature in Kelvin.
+        z_matrix: References for N atoms.
+        bonds: Bond lengths, shape (N-1,).
+        angles: Bond angles, shape (N-2,).
+        torsions: Torsions in [-pi, pi), shape (N-3,).
+        params: Rotation/translation-invariant force field for N atoms.
+        temperature: Positive finite scalar in Kelvin.
 
     Returns:
-        Scalar log unnormalized density (dimensionless).
+        Scalar log density; -inf outside support, with zero off-support gradient.
+
+    Raises:
+        ValueError: On malformed shapes, mismatched atoms or invalid temperature.
+        TypeError: On incorrect parameter types or non-float64 coordinates.
+
+    Migration: before 0.2 this function used the fixed-frame slice measure.
+    Use ``log_boltzmann_fixed_frame`` to request that measure explicitly.
     """
-    bonds = jnp.asarray(bonds)
-    angles = jnp.asarray(angles)
-    on_chart = zmatrix_in_domain(bonds, angles)
-    # Substitute the inputs as well as masking the output. Masking only the
-    # output still differentiates the unmasked branch, and 0 * NaN is NaN, so
-    # one off-chart sample would poison the gradient of a whole batch.
-    safe_bonds = jnp.where(on_chart, bonds, 1.0)
-    safe_angles = jnp.where(on_chart, angles, 1.0)
-    positions = zmatrix_to_cartesian(z_matrix, safe_bonds, safe_angles, torsions)
-    value = (
-        log_boltzmann(positions, params, temperature)
-        + zmatrix_log_abs_det_jacobian(z_matrix, safe_bonds, safe_angles)
-    )
-    return jnp.where(on_chart, value, -jnp.inf)
+    return _internal_density(z_matrix, bonds, angles, torsions, params, temperature, True)
+
+
+def log_boltzmann_fixed_frame(z_matrix, bonds, angles, torsions, params, temperature):
+    """Boltzmann density in the free Cartesian slice entries, not the MD marginal.
+
+    Arguments and support are as in ``log_boltzmann_internal``. The added volume
+    is ``zmatrix_log_abs_det_jacobian`` rather than the physical volume factor.
+    """
+    return _internal_density(z_matrix, bonds, angles, torsions, params, temperature, False)
 
 
 def log_boltzmann_regularized(
@@ -169,8 +174,7 @@ def log_boltzmann_regularized(
     Returns:
         Regularized log Boltzmann factor (dimensionless).
     """
-    energy = total_energy(positions, params)
-    reduced = energy / (KB * temperature)  # E / kBT
+    reduced = -log_boltzmann(positions, params, temperature)  # E / kBT
 
     # Log-dampen above energy_cut
     regularized = jnp.where(

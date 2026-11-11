@@ -353,7 +353,11 @@ def test_energy_components_vmap(aldp_md_frames, aldp_params):
     for i in range(10):
         single = energy_components(batch[i], aldp_params)
         for key in single:
-            assert abs(float(vmap_comps[key][i]) - float(single[key])) < 1e-10, (
+            # Match the documented 1e-8 kJ/mol JIT/reduction tolerance. Raw
+            # nonbonded pair terms can be O(1e6) before exclusion subtraction;
+            # their float64 rounding scale is O(1e-10), not the final energy's
+            # O(1e2)*eps. Vectorized reduction order can accumulate a few ulps.
+            assert abs(float(vmap_comps[key][i]) - float(single[key])) < 1e-8, (
                 f"frame {i}, {key}: vmap={float(vmap_comps[key][i])}, single={float(single[key])}"
             )
 
