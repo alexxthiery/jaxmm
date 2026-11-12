@@ -146,3 +146,8 @@ Notebooks: `matplotlib`, `py3Dmol` (lazy-imported).
 for precision checks, `batching.py` for mapping, and `extract.py` for pytree registration. It does not evaluate
 energy. `utils.py` composes the transform with energy for the physical internal
 density and the explicitly named fixed-frame density. See README migration notes.
+
+`sampling_coordinates.py` provides the independent `SamplingCoordinates` map
+(log half-lines, logit intervals, unchanged circular axes), inverse and safe
+density composition. `_validation._check_log_density` checks callback results
+for both coordinate pullbacks. See `docs/sampling_coordinates.md`.

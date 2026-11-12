@@ -443,3 +443,10 @@ checks used by the backend, so downstream wrappers need not copy them.
 `energy_components` owns force-term dispatch and the shared pair-distance matrix;
 `total_energy` sums those components in insertion order. Add optional terms in
 one dispatcher, rather than maintaining parallel total and diagnostic paths.
+
+### Sampling coordinates
+
+`SamplingCoordinates` composes centered log/logit maps with physical internal
+densities, keeps circular axes explicit, and supplies one additional log
+determinant. It is independent of samplers and force fields; see
+[the coordinate-map contract and usage](docs/sampling_coordinates.md).

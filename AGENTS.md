@@ -283,3 +283,22 @@ To orient in the codebase, read in this order:
   control. Keep independent geometric Jacobians and force references.
 - Prefer exact histogram counts and prescribed random innovations over large
   Monte Carlo assertions. Trajectory statistics must account for autocorrelation.
+
+## Sampling-coordinate maps
+
+`SamplingCoordinates` in `sampling_coordinates.py` owns centered log/logit maps,
+inverses and sampling-to-physical log determinants. Circular axes are unchanged
+with unit scale and explicit principal bounds. Compose with the physical internal
+callable; never duplicate its energy, support or volume. Probe floating-point
+representability without differentiation before substituting safe inputs.
+`_check_log_density` is the shared callback boundary check for both pullbacks.
+See `docs/sampling_coordinates.md` and the independent quadrature/AD tests.
+
+## Nonbonded numerical stability
+
+Remove excluded and exception pairs from the ordinary pair mask before energy
+evaluation. Never sum and then subtract their repulsions: close excluded atoms
+can create catastrophic cancellation and spurious negative wells. Evaluate
+inactive distances safely, and add explicit exceptions once, without applying
+the ordinary cutoff. `test_nonbonded_exclusions.py` has independent scalar
+energy and gradient controls including a coincident excluded pair.

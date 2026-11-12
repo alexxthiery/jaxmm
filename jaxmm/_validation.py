@@ -126,3 +126,17 @@ def _check_positions(positions, params):
             f"positions has {positions.shape[-2]} atoms but params expects "
             f"{params.n_atoms}. Check that positions matches the system."
         )
+
+
+def _check_log_density(values, batch_shape, name="log_density"):
+    """Validate callback shape/type and concrete arithmetic errors in pullbacks."""
+    values = jnp.asarray(values)
+    if values.shape != batch_shape:
+        raise ValueError(f"{name} must have shape {batch_shape}, got {values.shape}.")
+    if not (jnp.issubdtype(values.dtype, jnp.floating)
+            or jnp.issubdtype(values.dtype, jnp.integer)):
+        raise TypeError(f"{name} must be real valued, got {values.dtype}.")
+    valid = jnp.all(~(jnp.isnan(values) | jnp.isposinf(values)))
+    if not isinstance(valid, jax.core.Tracer) and not bool(valid):
+        raise ValueError(f"{name} must not contain NaN or +inf.")
+    return values

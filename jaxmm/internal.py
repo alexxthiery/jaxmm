@@ -15,7 +15,7 @@ from jaxmm.coordinates import (
     zmatrix_log_abs_det_jacobian, zmatrix_to_cartesian,
 )
 from jaxmm.extract import _register_pytree
-from jaxmm._validation import require_float64
+from jaxmm._validation import require_float64, _check_log_density
 from jaxmm.batching import map_events
 
 
@@ -286,14 +286,8 @@ class InternalCoordinates:
             _reject_concrete_invalid(self.in_support(reference), "reference must be a valid internal event.")
         valid = self.in_support(q)
         safe = jnp.where(valid[..., None], q, reference)
-        values = jnp.asarray(log_density(self._reconstruct(safe)))
-        if values.shape != q.shape[:-1]:
-            raise ValueError(f"Cartesian log density must have shape {q.shape[:-1]}, got {values.shape}.")
-        if not (jnp.issubdtype(values.dtype, jnp.floating)
-                or jnp.issubdtype(values.dtype, jnp.integer)):
-            raise TypeError(f"Cartesian log density must be real valued, got {values.dtype}.")
-        _reject_concrete_invalid(~(jnp.isnan(values) | jnp.isposinf(values)),
-                                 "Cartesian log density must not contain NaN or +inf.")
+        values = _check_log_density(log_density(self._reconstruct(safe)),
+                                    q.shape[:-1], "Cartesian log density")
         # The Cartesian target may impose further support. Its rejection must
         # also suppress the volume derivative, rather than differentiating
         # (-inf + log_volume) and returning a spurious nonzero gradient.

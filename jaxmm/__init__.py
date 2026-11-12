@@ -30,6 +30,7 @@ from jaxmm.utils import (
     KB, FEMTOSECOND, ANGSTROM, KCAL_PER_MOL,
 )
 from jaxmm.internal import InternalCoordinates
+from jaxmm.sampling_coordinates import SamplingCoordinates
 from jaxmm.batching import map_events
 from jaxmm._validation import require_float64, validate_temperature
 from jaxmm.integrate import verlet, langevin_baoab, baoab_step, kinetic_energy, MDTrajectory
@@ -79,6 +80,7 @@ __all__ = [
     "log_boltzmann_internal",
     "log_boltzmann_fixed_frame",
     "InternalCoordinates",
+    "SamplingCoordinates",
     "map_events",
     "require_float64",
     "validate_temperature",

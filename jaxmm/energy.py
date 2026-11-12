@@ -328,43 +328,25 @@ def _nonbonded_energy_with_dist(
     epsilon_ij = jnp.sqrt(params.epsilons[:, None] * params.epsilons[None, :])
     chargeprod_ij = params.charges[:, None] * params.charges[None, :]
 
+    # Excluded and exception pairs must never enter the ordinary pair sum.
+    # Summing huge short-range repulsions and subtracting them afterwards can
+    # erase real interactions or leave a spurious negative well through roundoff.
+    exc_i, exc_j = params.exclusion_pairs[:, 0], params.exclusion_pairs[:, 1]
+    exn_i, exn_j = params.exception_pairs[:, 0], params.exception_pairs[:, 1]
+    mask = upper.at[exc_i, exc_j].set(False).at[exn_i, exn_j].set(False)
     if params.cutoff is not None:
-        # Compute LJ and Coulomb separately for switching
-        sig_over_r = sigma_ij / dist
-        sig_over_r6 = sig_over_r**6
-        lj_ij = 4.0 * epsilon_ij * (sig_over_r6**2 - sig_over_r6)
-        coul_ij = ONE_4PI_EPS0 * chargeprod_ij / dist
-
-        # Apply switching to LJ only
-        if params.switch_distance is not None:
-            sw = _lj_switch(dist, params.switch_distance, params.cutoff)
-            lj_ij = lj_ij * sw
-
-        pair_e = lj_ij + coul_ij
-
-        # Mask pairs beyond cutoff
-        within_cutoff = dist < params.cutoff
-        mask = upper & within_cutoff
+        mask = mask & (dist < params.cutoff)
+    normal_dist = jnp.where(mask, dist, 1.0)
+    if params.switch_distance is not None and params.cutoff is not None:
+        sig_over_r6 = (sigma_ij / normal_dist)**6
+        lj = 4.0 * epsilon_ij * (sig_over_r6**2 - sig_over_r6)
+        pair_e = lj * _lj_switch(normal_dist, params.switch_distance, params.cutoff)
+        pair_e += ONE_4PI_EPS0 * chargeprod_ij / normal_dist
     else:
-        pair_e = _pair_energy(dist, sigma_ij, epsilon_ij, chargeprod_ij)
-        mask = upper
-
+        pair_e = _pair_energy(normal_dist, sigma_ij, epsilon_ij, chargeprod_ij)
     total = jnp.sum(jnp.where(mask, pair_e, 0.0))
 
-    # Exclusions and exceptions (bonded neighbors, always within cutoff)
-    exc_i = params.exclusion_pairs[:, 0]
-    exc_j = params.exclusion_pairs[:, 1]
-    total = total - jnp.sum(_pair_energy(
-        dist[exc_i, exc_j], sigma_ij[exc_i, exc_j],
-        epsilon_ij[exc_i, exc_j], chargeprod_ij[exc_i, exc_j],
-    ))
-
-    exn_i = params.exception_pairs[:, 0]
-    exn_j = params.exception_pairs[:, 1]
-    total = total - jnp.sum(_pair_energy(
-        dist[exn_i, exn_j], sigma_ij[exn_i, exn_j],
-        epsilon_ij[exn_i, exn_j], chargeprod_ij[exn_i, exn_j],
-    ))
+    # Explicit 1-4 interactions are not subject to the ordinary pair cutoff.
     total = total + jnp.sum(_pair_energy(
         dist[exn_i, exn_j], params.exception_sigma,
         params.exception_epsilon, params.exception_chargeprod,
